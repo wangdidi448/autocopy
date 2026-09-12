@@ -22,12 +22,14 @@ from email.utils import parsedate_to_datetime
 
 import urllib.request
 import zipfile
-from PySide6.QtCore import (Qt, QObject, Signal, QPoint, QSize, QEvent)
-from PySide6.QtGui import (QFont, QIcon, QColor, QCursor)
+from PySide6.QtCore import (Qt, QObject, Signal, QPoint, QSize, QEvent,
+                            QMimeData)
+from PySide6.QtGui import (QFont, QIcon, QColor, QCursor, QDrag)
 from PySide6.QtWidgets import (
     QApplication, QWidget, QFrame, QLabel, QPushButton, QVBoxLayout,
     QHBoxLayout, QComboBox, QScrollArea, QSizePolicy, QDialog, QLineEdit,
-    QCheckBox, QGridLayout, QGraphicsDropShadowEffect, QInputDialog)
+    QCheckBox, QGridLayout, QGraphicsDropShadowEffect, QInputDialog,
+    QFileDialog)
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(APP_DIR, "quick_copy_data.json")
@@ -511,6 +513,37 @@ class BindDialog(QDialog):
         self.sms_st.setText(f"已绑定 {devs[0]}")
 
 
+# ================= 拖放宿主 =================
+class DropHost(QWidget):
+    requestMove = Signal(int, int)
+
+    def __init__(self):
+        super().__init__()
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasFormat("application/x-rowidx"):
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        if e.mimeData().hasFormat("application/x-rowidx"):
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        if not e.mimeData().hasFormat("application/x-rowidx"):
+            return
+        src = int(bytes(e.mimeData().data("application/x-rowidx")).decode())
+        cards = self.findChildren(RowCard)
+        target = len(cards)
+        y = e.position().y()
+        for i, c in enumerate(cards):
+            cy = c.y() + c.height()/2
+            if y < cy:
+                target = i; break
+        e.acceptProposedAction()
+        self.requestMove.emit(src, target)
+
+
 # ================= 字段行卡片 =================
 class RowCard(QFrame):
     def __init__(self, main, idx, item):
@@ -534,6 +567,8 @@ class RowCard(QFrame):
         h.addWidget(self.k); h.addWidget(self.v, 1)
         h.addWidget(b_edit); h.addWidget(b_del)
         self._del_arm = False
+        self._press = None; self._moved = False
+        self.setCursor(Qt.PointingHandCursor)
 
     def _set_value_text(self, item):
         if self.main.masked:
@@ -543,7 +578,26 @@ class RowCard(QFrame):
             self.v.setText(val[:24] + ("…" if len(val) > 24 else ""))
 
     def mousePressEvent(self, e):
-        self.main.do_copy(self.idx)
+        if e.button() == Qt.LeftButton:
+            self._press = e.globalPosition().toPoint()
+            self._moved = False
+
+    def mouseMoveEvent(self, e):
+        if self._press is None:
+            return
+        if (e.globalPosition().toPoint()-self._press).manhattanLength() < 8:
+            return
+        self._moved = True
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData("application/x-rowidx", str(self.idx).encode())
+        drag.setMimeData(mime)
+        drag.exec(Qt.MoveAction)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and not self._moved:
+            self.main.do_copy(self.idx)
+        self._press = None
 
     def delete_armed(self):
         return self._del_arm
@@ -668,7 +722,8 @@ class MainWindow(QWidget):
         self.cb.currentIndexChanged.connect(self.on_group)
         g.addWidget(self.cb, 1)
         for t, fn in (("＋", self.add_group), ("✎", self.rename_group),
-                      ("✕", self.delete_group)):
+                      ("✕", self.delete_group),
+                      ("⇓", self.import_data), ("⇑", self.export_data)):
             b = QPushButton(t); b.setObjectName("gbtn")
             b.setCursor(Qt.PointingHandCursor); b.clicked.connect(fn)
             g.addWidget(b)
@@ -844,7 +899,8 @@ class MainWindow(QWidget):
     def build_rows_area(self, layout):
         self.scroll = QScrollArea(); self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.rows_host = QWidget(); self.rows_host.setObjectName("rowshost")
+        self.rows_host = DropHost(); self.rows_host.setObjectName("rowshost")
+        self.rows_host.requestMove.connect(self.move_row)
         self.rows_lay = QVBoxLayout(self.rows_host)
         self.rows_lay.setContentsMargins(2,2,6,2); self.rows_lay.setSpacing(4)
         self.rows_lay.addStretch()
@@ -867,6 +923,16 @@ class MainWindow(QWidget):
                 rc = RowCard(self, i, item)
                 self.rows_lay.insertWidget(i, rc); self.rows.append(rc)
         self.adjust_height()
+
+    def move_row(self, src, target):
+        f = self.fields
+        if not (0 <= src < len(f)) or target == src:
+            return
+        item = f.pop(src)
+        if target > src:
+            target -= 1
+        f.insert(target, item)
+        self.refresh_rows(); self.save_data()
 
     # ---------- 复制/增改删 ----------
     def do_copy(self, idx):
@@ -957,6 +1023,81 @@ class MainWindow(QWidget):
         self.pos_xy = [self.x(), self.y()]; self.save_data()
 
     # 持久化
+    def export_data(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出数据（备份/换机用）", "quick_copy_data.json",
+            "JSON 文件 (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"groups": self.groups,
+                           "active_group": self.active_group,
+                           "pos": [self.x(), self.y()],
+                           "collapsed": self.collapsed,
+                           "pin_on": self.pin_on, "masked": self.masked},
+                          f, ensure_ascii=False, indent=2)
+            self.flash(f"已导出到 {os.path.basename(path)}")
+        except Exception as e:
+            self.flash(f"导出失败：{e}", True)
+
+    def import_data(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择要导入的 JSON", "", "JSON 文件 (*.json)")
+        if not path:
+            return
+        try:
+            d = json.load(open(path, encoding="utf-8"))
+        except Exception as e:
+            self.flash(f"文件无法解析：{e}", True); return
+        new_groups = self._normalize_import(d)
+        if not new_groups:
+            self.flash("文件里没有可用条目", True); return
+        mode, ok = QInputDialog.getItem(
+            self, "导入方式", "选择导入方式：",
+            ["替换全部数据", "按组合并（重名组/字段自动跳过）"], 0, False)
+        if not ok:
+            return
+        if mode.startswith("替换"):
+            self.groups = new_groups
+            self.active_group = 0
+        else:
+            self._merge_groups(new_groups)
+        self.refresh_groups(); self.refresh_rows(); self.save_data()
+        self.flash("导入完成")
+
+    @staticmethod
+    def _normalize_import(d):
+        """兼容 groups 版 / 旧平铺版 / 纯列表"""
+        if isinstance(d, dict) and d.get("groups"):
+            gs = []
+            for g in d["groups"]:
+                if isinstance(g, dict) and g.get("fields") is not None:
+                    gs.append({"name": str(g.get("name") or "未命名"),
+                               "fields": g["fields"]})
+            return gs
+        fields = None
+        if isinstance(d, dict):
+            fields = d.get("fields")
+        elif isinstance(d, list):
+            fields = d
+        if isinstance(fields, list):
+            return [{"name": "导入数据", "fields": fields}]
+        return []
+
+    def _merge_groups(self, new_groups):
+        for ng in new_groups:
+            hit = next((g for g in self.groups
+                        if g["name"] == ng["name"]), None)
+            if hit is None:
+                self.groups.append({"name": ng["name"],
+                                    "fields": list(ng["fields"])})
+                continue
+            exist = {f["name"] for f in hit["fields"]}
+            for f in ng["fields"]:
+                if f["name"] not in exist:
+                    hit["fields"].append(f); exist.add(f["name"])
+
     def load_data(self):
         d = None
         if os.path.exists(DATA_FILE):
