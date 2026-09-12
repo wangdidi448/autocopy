@@ -113,6 +113,9 @@ QDialog,QMessageBox {{ background:{BG}; }}
 #dlgbtn2 {{ background:#e7eaf1; color:#555; border:none; border-radius:7px;
             padding:6px 14px; }}
 #dlgbtn2:hover {{ background:#d9deea; }}
+#adbbtn {{ background:{ACCENT}; color:#fff; border:none; border-radius:7px;
+           padding:6px 2px; font-size:12px; min-width:54px; }}
+#adbbtn:hover {{ background:{ACCENT_D}; }}
 #swatch {{ border:1px solid #d5dbe6; border-radius:6px; max-width:26px;
            min-height:22px; }}
 QToolTip {{ background:#2b3245; color:#ffffff; border:none;
@@ -396,7 +399,7 @@ class BindDialog(QDialog):
         super().__init__(app)
         self.app = app
         self.setWindowTitle("绑定邮箱 / 手机")
-        self.setFixedWidth(320)
+        self.setFixedWidth(440)
         lay = QVBoxLayout(self); lay.setSpacing(7); lay.setContentsMargins(16,14,16,14)
 
         lay.addWidget(QLabel("① 邮箱（自动获取邮件验证码）"))
@@ -417,21 +420,22 @@ class BindDialog(QDialog):
 
         lay.addWidget(QLabel("② 安卓手机（短信验证码 / USB 或无线）"))
         g = QGridLayout(); g.setSpacing(6)
-        self.e_pair = QLineEdit(); self.e_pair.setPlaceholderText("无线配对 地址:端口")
-        self.e_pcode = QLineEdit(); self.e_pcode.setPlaceholderText("配对码")
-        self.e_conn = QLineEdit(); self.e_conn.setPlaceholderText("连接 地址:端口")
+        self.e_pair = QLineEdit(); self.e_pair.setPlaceholderText("配对地址:端口（点“使用配对码配对设备”页里的端口）")
+        self.e_pcode = QLineEdit(); self.e_pcode.setPlaceholderText("6位配对码")
+        self.e_conn = QLineEdit(); self.e_conn.setPlaceholderText("连接地址:端口（退回主页面显示的端口，配对成功后用）")
         g.addWidget(self.e_pair,0,0,1,2); g.addWidget(self.e_pcode,1,0)
         self.sms_st = QLabel(""); self.sms_st.setStyleSheet(f"color:{MUTED};")
         g.addWidget(self.e_pcode,1,1); g.addWidget(self.e_conn,2,0,1,2)
         lay.addLayout(g)
-        r = QHBoxLayout()
+        r = QHBoxLayout(); r.setSpacing(5)
         bspecs = (("检测", self.check, "检测 adb 与已连接设备"),
-                  ("配对", self.pair, "无线配对（填地址端口+配对码）"),
-                  ("连接", self.connect, "无线连接设备"),
+                  ("配对", self.pair, "无线配对（填配对页地址端口+配对码）"),
+                  ("连接", self.connect, "无线连接设备（配对成功后）"),
                   ("下载adb", self.dl_adb, "自动下载安装 adb"),
                   ("绑定设备", self.bind, "绑定当前设备用于读短信"))
         for t, fn, tip in bspecs:
-            b = QPushButton(t); b.setObjectName("dlgbtn"); b.setToolTip(tip)
+            b = QPushButton(t); b.setObjectName("adbbtn"); b.setToolTip(tip)
+            b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(fn); r.addWidget(b)
         lay.addLayout(r)
         lay.addWidget(self.sms_st)
@@ -497,13 +501,35 @@ class BindDialog(QDialog):
                 self.sms_st.setText(str(e)[:60])
         threading.Thread(target=work, daemon=True).start()
 
+    @staticmethod
+    def _check_endpoint(t):
+        if ":" not in t: return "格式应为 地址:端口"
+        port = t.rsplit(":", 1)[1]
+        if not (port.isdigit() and 1 <= int(port) <= 65535):
+            return f"端口无效：{port}（范围1-65535，手机端口一般为5位）"
+        return ""
+
     def pair(self):
         a, c = self.e_pair.text().strip(), self.e_pcode.text().strip()
-        if a and c: self._adb(["pair", a, c])
+        if not (a and c):
+            self.sms_st.setText("配对需填 配对页地址:端口 和 6位配对码")
+            self.sms_st.setStyleSheet("color:#e53935;"); return
+        err = self._check_endpoint(a)
+        if err:
+            self.sms_st.setText(err); self.sms_st.setStyleSheet("color:#e53935;")
+            return
+        self._adb(["pair", a, c])
 
     def connect(self):
         a = self.e_conn.text().strip() or self.e_pair.text().strip()
-        if a: self._adb(["connect", a])
+        if not a:
+            self.sms_st.setText("填主页面的 连接地址:端口")
+            self.sms_st.setStyleSheet("color:#e53935;"); return
+        err = self._check_endpoint(a)
+        if err:
+            self.sms_st.setText(err); self.sms_st.setStyleSheet("color:#e53935;")
+            return
+        self._adb(["connect", a])
 
     def dl_adb(self):
         def work():
