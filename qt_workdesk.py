@@ -293,7 +293,7 @@ def sms_fetch(cfg):
     out = subprocess.run(cmd, capture_output=True, timeout=12,
                          creationflags=subprocess.CREATE_NO_WINDOW)
     base = int(cfg.get("base_date", 0))
-    n = 0
+    latest = None
     for line in out.stdout.decode("utf-8", "replace").splitlines():
         m = re.match(r"Row:\s*\d+\s*date=(\d+)\s*body=(.*)", line, re.S)
         if not m:
@@ -302,12 +302,14 @@ def sms_fetch(cfg):
         if n > 15:
             break
         dms, body = int(m.group(1)), m.group(2).rstrip(",")
+        if latest is None:
+            latest = (dms, body)
         if dms <= base:
             continue
         code = extract_code(body)
         if code:
-            return dms, code
-    return None
+            return dms, code, latest
+    return None, None, latest
 
 
 def install_adb(cb):
@@ -921,10 +923,12 @@ class MainWindow(QWidget):
 
     def sms_worker(self, cfg):
         try:
-            r = sms_fetch(cfg)
-            if r:
-                dms, code = r
+            dms, code, latest = sms_fetch(cfg)
+            if code:
                 self._found(code, "sms", dms/1000, dms)
+            elif latest and latest[0] > int(cfg.get("base_date", 0)):
+                self.code_status(
+                    f"收到新短信但未识别到验证码：{latest[1][:22]}…", "#e08a00")
         except Exception as e:
             self._fail("短信", str(e))
 
@@ -1190,7 +1194,7 @@ class MainWindow(QWidget):
         d = None
         if os.path.exists(DATA_FILE):
             try:
-                d = json.load(open(DATA_FILE, encoding="utf-8"))
+                d = json.load(open(DATA_FILE, encoding="utf-8-sig"))
             except Exception:
                 d = None
         if d and d.get("groups"):
@@ -1215,7 +1219,7 @@ class MainWindow(QWidget):
     def load_verify_cfg(self):
         if os.path.exists(CONFIG_FILE):
             try:
-                self.verify_cfg.update(json.load(open(CONFIG_FILE,encoding="utf-8")))
+                self.verify_cfg.update(json.load(open(CONFIG_FILE,encoding="utf-8-sig")))
             except Exception:
                 pass
 
