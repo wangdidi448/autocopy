@@ -83,6 +83,7 @@ QComboBox QAbstractItemView {{ background:#fff; border:1px solid {BORDER};
          padding:5px 10px; font-size:8.5pt; }}
 .mini:hover, #mini:hover {{ background:{ACCENT_D}; }}
 .mini:pressed, #mini:pressed {{ background:#2c45ad; }}
+.mini:disabled, #mini:disabled {{ background:#c8cedb; color:#e9ecf3; }}
 #code {{ background:#f6f8fe; border:1px solid #dfe6f5; border-radius:8px;
          font-family:Consolas; font-size:18pt; font-weight:700;
          color:{ACCENT}; padding:4px; }}
@@ -640,6 +641,7 @@ class MainWindow(QWidget):
         rl.addWidget(self.body)
 
         self.refresh_groups(); self.refresh_rows(); self.adjust_height()
+        self.update_btns_state()
         if not self.verify_cfg.get("show_panel", True):
             self.vpanel.hide()
         if self.collapsed:
@@ -789,11 +791,15 @@ class MainWindow(QWidget):
         self.code_lbl.mousePressEvent = lambda e: self.copy_code()
         v.addWidget(self.code_lbl)
         r = QHBoxLayout()
-        for t, fn in (("邮箱", self.fetch_email), ("短信", self.fetch_sms),
-                      ("绑定", self.open_bind), ("停止", self.stop_watch)):
-            b = QPushButton(t); b.setObjectName("mini" if t!="停止" else "mini")
-            b.setCursor(Qt.PointingHandCursor); b.clicked.connect(fn)
-            r.addWidget(b)
+        self.b_email = QPushButton("邮箱")
+        self.b_sms = QPushButton("短信")
+        b_bind = QPushButton("绑定")
+        b_stop = QPushButton("停止")
+        for b, fn in ((self.b_email, self.fetch_email),
+                      (self.b_sms, self.fetch_sms),
+                      (b_bind, self.open_bind), (b_stop, self.stop_watch)):
+            b.setObjectName("mini"); b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(fn); r.addWidget(b)
         v.addLayout(r)
         self.code_st = QLabel("未获取"); self.code_st.setStyleSheet(f"color:{MUTED};")
         v.addWidget(self.code_st)
@@ -899,9 +905,15 @@ class MainWindow(QWidget):
     def stop_watch(self):
         if self._watch: self._watch.cancel(); self._watch = None
         self._watch_left = 0
+        self.code_status("已停止等待")
+
+    def update_btns_state(self):
+        self.b_email.setEnabled(bool(self.verify_cfg.get("email")))
+        self.b_sms.setEnabled(bool(self.verify_cfg.get("sms")))
 
     def open_bind(self):
         BindDialog(self).exec()
+        self.update_btns_state()
 
     # ---------- 行区域 ----------
     def build_rows_area(self, layout):
