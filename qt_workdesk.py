@@ -181,10 +181,12 @@ def _msg_text(msg):
     return re.sub(r"<[^>]+>", " ", "\n".join(chunks))
 
 
-def extract_code(text):
+def extract_code(text, strict=False):
     m = CODE_NEAR_RE.search(text)
     if m:
         return m.group(1)
+    if strict:
+        return None
     c = NUM_RE.findall(text)
     return c[0] if c else None
 
@@ -283,32 +285,52 @@ def adb_devices():
     return adb, devs
 
 
-def sms_fetch(cfg):
+SMS_PKG_RE = re.compile(r"(mms|sms|message)", re.I)
+NOTIF_LINE_RE = re.compile(r"(tickerText=|android\.(?:title|text|bigText)=)")
+
+
+def notif_records(cfg):
     adb = find_adb()
     cmd = [adb]
     if cfg.get("serial"):
         cmd += ["-s", cfg["serial"]]
-    cmd += ["shell", "content", "query", "--uri", "content://sms/inbox",
-            "--projection", "date,body"]
+    cmd += ["shell", "dumpsys", "notification", "--noredact"]
     out = subprocess.run(cmd, capture_output=True, timeout=12,
                          creationflags=subprocess.CREATE_NO_WINDOW)
+    recs, cur = [], None
+    for line in out.stdout.decode("utf-8", "replace").splitlines():
+        s = line.strip()
+        if s.startswith("key="):
+            if cur:
+                recs.append(cur)
+            parts = s[4:].split("|")
+            cur = {"pkg": parts[1] if len(parts) > 1 else "",
+                   "when": 0, "blobs": []}
+        elif cur is not None:
+            mw = re.match(r"when=(\d+)", s)
+            if mw:
+                cur["when"] = int(mw.group(1))
+            elif NOTIF_LINE_RE.search(s):
+                cur["blobs"].append(s.split("=", 1)[1])
+    if cur:
+        recs.append(cur)
+    return recs
+
+
+def sms_fetch(cfg):
+    # ColorOS 等系统把服务号短信移出标准短信库，改为读取通知栏记录
     base = int(cfg.get("base_date", 0))
     latest = None
-    for line in out.stdout.decode("utf-8", "replace").splitlines():
-        m = re.match(r"Row:\s*\d+\s*date=(\d+)\s*body=(.*)", line, re.S)
-        if not m:
+    for r in sorted(notif_records(cfg), key=lambda x: x["when"], reverse=True):
+        blob = " ".join(r["blobs"])
+        if r["when"] and latest is None:
+            latest = (r["when"], blob)
+        if r["when"] <= base:
             continue
-        n += 1
-        if n > 15:
-            break
-        dms, body = int(m.group(1)), m.group(2).rstrip(",")
-        if latest is None:
-            latest = (dms, body)
-        if dms <= base:
-            continue
-        code = extract_code(body)
+        is_sms = bool(SMS_PKG_RE.search(r["pkg"]))
+        code = extract_code(blob, strict=not is_sms)
         if code:
-            return dms, code, latest
+            return r["when"], code, latest
     return None, None, latest
 
 
