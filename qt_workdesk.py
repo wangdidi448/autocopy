@@ -115,6 +115,8 @@ QDialog,QMessageBox {{ background:{BG}; }}
 #dlgbtn2:hover {{ background:#d9deea; }}
 #swatch {{ border:1px solid #d5dbe6; border-radius:6px; max-width:26px;
            min-height:22px; }}
+QToolTip {{ background:#2b3245; color:#ffffff; border:none;
+            border-radius:5px; padding:4px 8px; }}
 """
 
 
@@ -357,7 +359,7 @@ class FieldDialog(QDialog):
         for c in COLOR_CHOICES:
             b = QPushButton(); b.setObjectName("swatch")
             b.setStyleSheet(f"background:{c};")
-            b.setCheckable(True)
+            b.setCheckable(True); b.setToolTip("key 显示颜色")
             b.clicked.connect(lambda _, col=c: self.pick(col))
             row.addWidget(b); self.sw[c] = b
         lay.addLayout(row)
@@ -365,8 +367,10 @@ class FieldDialog(QDialog):
 
         bs = QHBoxLayout(); bs.addStretch()
         no = QPushButton("取消"); no.setObjectName("dlgbtn2")
+        no.setToolTip("放弃本次修改")
         no.clicked.connect(self.reject)
         ok = QPushButton("确定"); ok.setObjectName("dlgbtn")
+        ok.setToolTip("保存此条目")
         ok.clicked.connect(self.accept)
         bs.addWidget(no); bs.addWidget(ok)
         lay.addLayout(bs)
@@ -406,6 +410,7 @@ class BindDialog(QDialog):
         self.e_addr.textChanged.connect(self.auto_host)
         lay.addWidget(self.e_addr); lay.addWidget(self.e_sec); lay.addWidget(self.e_host)
         b1 = QPushButton("保存并绑定邮箱"); b1.setObjectName("dlgbtn")
+        b1.setToolTip("登录邮箱并建立收件基线")
         b1.clicked.connect(self.save_email); lay.addWidget(b1)
         self.mail_st = QLabel(""); self.mail_st.setStyleSheet(f"color:{ACCENT};")
         lay.addWidget(self.mail_st)
@@ -420,15 +425,19 @@ class BindDialog(QDialog):
         g.addWidget(self.e_pcode,1,1); g.addWidget(self.e_conn,2,0,1,2)
         lay.addLayout(g)
         r = QHBoxLayout()
-        for t, fn in (("检测", self.check), ("配对", self.pair),
-                      ("连接", self.connect), ("下载adb", self.dl_adb),
-                      ("绑定设备", self.bind)):
-            b = QPushButton(t); b.setObjectName("dlgbtn"); b.clicked.connect(fn)
-            r.addWidget(b)
+        bspecs = (("检测", self.check, "检测 adb 与已连接设备"),
+                  ("配对", self.pair, "无线配对（填地址端口+配对码）"),
+                  ("连接", self.connect, "无线连接设备"),
+                  ("下载adb", self.dl_adb, "自动下载安装 adb"),
+                  ("绑定设备", self.bind, "绑定当前设备用于读短信"))
+        for t, fn, tip in bspecs:
+            b = QPushButton(t); b.setObjectName("dlgbtn"); b.setToolTip(tip)
+            b.clicked.connect(fn); r.addWidget(b)
         lay.addLayout(r)
         lay.addWidget(self.sms_st)
 
         close = QPushButton("关闭"); close.setObjectName("dlgbtn2")
+        close.setToolTip("关闭绑定窗口")
         close.clicked.connect(self.accept)
         lay.addWidget(close)
         self.check()
@@ -563,10 +572,13 @@ class RowCard(QFrame):
         self._set_value_text(item)
         b_edit = QPushButton("✎"); b_edit.setObjectName("rbtn")
         b_del = QPushButton("✕"); b_del.setObjectName("rbtn")
+        b_edit.setToolTip("修改此条目")
+        b_del.setToolTip("删除此条目（有确认）")
         b_edit.clicked.connect(lambda: main.click_edit(idx))
         b_del.clicked.connect(lambda: main.click_delete(idx, b_del))
         h.addWidget(self.k); h.addWidget(self.v, 1)
         h.addWidget(b_edit); h.addWidget(b_del)
+        self.setToolTip("点击复制 · 按住可拖动排序")
         self._press = None; self._moved = False
         self.setCursor(Qt.PointingHandCursor)
 
@@ -686,6 +698,12 @@ class MainWindow(QWidget):
         for b in (self.t_close,self.t_col,self.t_pin,self.t_code,
                   self.t_mask,self.t_add):
             h.addWidget(b)
+        self.t_add.setToolTip("添加一条新字段")
+        self.t_mask.setToolTip("隐藏 / 显示所有条目内容")
+        self.t_code.setToolTip("显示 / 隐藏验证码助手")
+        self.t_pin.setToolTip("窗口始终置顶开关")
+        self.t_col.setToolTip("折叠 / 展开窗口")
+        self.t_close.setToolTip("关闭程序")
         self.t_mask.setText("显" if self.masked else "隐")
         parent_layout.addWidget(tb)
         self.titlebar = tb
@@ -713,13 +731,17 @@ class MainWindow(QWidget):
         self.cb = QComboBox()
         self.cb.setMinimumHeight(28)
         self.cb.currentIndexChanged.connect(self.on_group)
+        self.cb.setToolTip("切换分组")
         g.addWidget(self.cb, 1)
-        for t, fn in (("＋", self.add_group), ("✎", self.rename_group),
-                      ("✕", self.delete_group),
-                      ("⇓", self.import_data), ("⇑", self.export_data)):
+        gspecs = (("＋", self.add_group, "新建一个分组"),
+                  ("✎", self.rename_group, "给当前分组改名"),
+                  ("✕", self.delete_group, "删除当前分组（有确认）"),
+                  ("⇓", self.import_data, "从 JSON 文件导入数据"),
+                  ("⇑", self.export_data, "导出 JSON 备份 / 换机用"))
+        for t, fn, tip in gspecs:
             b = QPushButton(t); b.setObjectName("gbtn")
             b.setCursor(Qt.PointingHandCursor); b.clicked.connect(fn)
-            g.addWidget(b)
+            b.setToolTip(tip); g.addWidget(b)
         layout.addLayout(g)
 
     def refresh_groups(self):
@@ -788,6 +810,7 @@ class MainWindow(QWidget):
         self.code_lbl = QLabel("———"); self.code_lbl.setObjectName("code")
         self.code_lbl.setAlignment(Qt.AlignCenter)
         self.code_lbl.setCursor(Qt.PointingHandCursor)
+        self.code_lbl.setToolTip("点击复制验证码")
         self.code_lbl.mousePressEvent = lambda e: self.copy_code()
         v.addWidget(self.code_lbl)
         r = QHBoxLayout()
@@ -795,11 +818,13 @@ class MainWindow(QWidget):
         self.b_sms = QPushButton("短信")
         b_bind = QPushButton("绑定")
         b_stop = QPushButton("停止")
-        for b, fn in ((self.b_email, self.fetch_email),
-                      (self.b_sms, self.fetch_sms),
-                      (b_bind, self.open_bind), (b_stop, self.stop_watch)):
+        specs = ((self.b_email, self.fetch_email, "从已绑定邮箱获取新验证码"),
+                 (self.b_sms, self.fetch_sms, "从已绑定手机短信获取验证码"),
+                 (b_bind, self.open_bind, "绑定邮箱 / 手机"),
+                 (b_stop, self.stop_watch, "停止等待验证码"))
+        for b, fn, tip in specs:
             b.setObjectName("mini"); b.setCursor(Qt.PointingHandCursor)
-            b.clicked.connect(fn); r.addWidget(b)
+            b.clicked.connect(fn); b.setToolTip(tip); r.addWidget(b)
         v.addLayout(r)
         self.code_st = QLabel("未获取"); self.code_st.setStyleSheet(f"color:{MUTED};")
         v.addWidget(self.code_st)
