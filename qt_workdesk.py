@@ -419,13 +419,23 @@ class BindDialog(QDialog):
         lay.addWidget(self.mail_st)
 
         lay.addWidget(QLabel("② 安卓手机（短信验证码 / USB 或无线）"))
+        tip2 = QLabel("无线步骤：手机点“使用配对码配对设备”→ 填“配对”三项后点配对；成功后用主页面端口填“连接”再点连接")
+        tip2.setStyleSheet(f"color:{MUTED}; font-size:11px;"); tip2.setWordWrap(True)
+        lay.addWidget(tip2)
         g = QGridLayout(); g.setSpacing(6)
-        self.e_pair = QLineEdit(); self.e_pair.setPlaceholderText("配对地址:端口（点“使用配对码配对设备”页里的端口）")
+        self.e_pair_ip = QLineEdit(); self.e_pair_ip.setPlaceholderText("配对 IP，如 192.168.5.22")
+        self.e_pair_port = QLineEdit(); self.e_pair_port.setPlaceholderText("配对端口")
         self.e_pcode = QLineEdit(); self.e_pcode.setPlaceholderText("6位配对码")
-        self.e_conn = QLineEdit(); self.e_conn.setPlaceholderText("连接地址:端口（退回主页面显示的端口，配对成功后用）")
-        g.addWidget(self.e_pair,0,0,1,2); g.addWidget(self.e_pcode,1,0)
+        self.e_conn_ip = QLineEdit(); self.e_conn_ip.setPlaceholderText("连接 IP，一般同左")
+        self.e_conn_port = QLineEdit(); self.e_conn_port.setPlaceholderText("连接端口（主页面）")
+        g.addWidget(QLabel("配对"),0,0)
+        g.addWidget(self.e_pair_ip,0,1); g.addWidget(self.e_pair_port,0,2)
+        g.addWidget(self.e_pcode,1,1,1,2)
+        g.addWidget(QLabel("连接"),2,0)
+        g.addWidget(self.e_conn_ip,2,1); g.addWidget(self.e_conn_port,2,2)
+        self.e_pair_ip.textChanged.connect(
+            lambda t: self.e_conn_ip.setText(t) if not self.e_conn_ip.text() else None)
         self.sms_st = QLabel(""); self.sms_st.setStyleSheet(f"color:{MUTED};")
-        g.addWidget(self.e_pcode,1,1); g.addWidget(self.e_conn,2,0,1,2)
         lay.addLayout(g)
         r = QHBoxLayout(); r.setSpacing(5)
         bspecs = (("检测", self.check, "检测 adb 与已连接设备"),
@@ -502,34 +512,30 @@ class BindDialog(QDialog):
         threading.Thread(target=work, daemon=True).start()
 
     @staticmethod
-    def _check_endpoint(t):
-        if ":" not in t: return "格式应为 地址:端口"
-        port = t.rsplit(":", 1)[1]
-        if not (port.isdigit() and 1 <= int(port) <= 65535):
-            return f"端口无效：{port}（范围1-65535，手机端口一般为5位）"
-        return ""
+    def _valid_port(p):
+        return p.isdigit() and 1 <= int(p) <= 65535
+
+    def _warn(self, m):
+        self.sms_st.setText(m); self.sms_st.setStyleSheet("color:#e53935;")
 
     def pair(self):
-        a, c = self.e_pair.text().strip(), self.e_pcode.text().strip()
-        if not (a and c):
-            self.sms_st.setText("配对需填 配对页地址:端口 和 6位配对码")
-            self.sms_st.setStyleSheet("color:#e53935;"); return
-        err = self._check_endpoint(a)
-        if err:
-            self.sms_st.setText(err); self.sms_st.setStyleSheet("color:#e53935;")
-            return
-        self._adb(["pair", a, c])
+        ip = self.e_pair_ip.text().strip()
+        port = self.e_pair_port.text().strip()
+        code = self.e_pcode.text().strip()
+        if not (ip and port and code):
+            self._warn("配对需填：配对 IP、配对端口、6位配对码"); return
+        if not self._valid_port(port):
+            self._warn(f"配对端口无效：{port}（1-65535，一般5位）"); return
+        self._adb(["pair", f"{ip}:{port}", code])
 
     def connect(self):
-        a = self.e_conn.text().strip() or self.e_pair.text().strip()
-        if not a:
-            self.sms_st.setText("填主页面的 连接地址:端口")
-            self.sms_st.setStyleSheet("color:#e53935;"); return
-        err = self._check_endpoint(a)
-        if err:
-            self.sms_st.setText(err); self.sms_st.setStyleSheet("color:#e53935;")
-            return
-        self._adb(["connect", a])
+        ip = self.e_conn_ip.text().strip() or self.e_pair_ip.text().strip()
+        port = self.e_conn_port.text().strip()
+        if not (ip and port):
+            self._warn("连接需填：连接 IP 和主页面上的连接端口"); return
+        if not self._valid_port(port):
+            self._warn(f"连接端口无效：{port}（1-65535，一般5位）"); return
+        self._adb(["connect", f"{ip}:{port}"])
 
     def dl_adb(self):
         def work():
