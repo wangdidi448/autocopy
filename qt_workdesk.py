@@ -1,0 +1,1009 @@
+# -*- coding: utf-8 -*-
+"""
+快捷工作台 · Qt(PySide6) 版
+圆角悬浮 + 阴影 + 卡片主题；分组；平滑滚动；邮箱/短信验证码
+"""
+import base64
+import ctypes
+import ctypes.wintypes
+import email
+import imaplib
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import threading
+import time
+from contextlib import contextmanager
+from email.header import decode_header
+from email.utils import parsedate_to_datetime
+
+import urllib.request
+import zipfile
+from PySide6.QtCore import (Qt, QObject, Signal, QPoint, QSize, QEvent)
+from PySide6.QtGui import (QFont, QIcon, QColor, QCursor)
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QFrame, QLabel, QPushButton, QVBoxLayout,
+    QHBoxLayout, QComboBox, QScrollArea, QSizePolicy, QDialog, QLineEdit,
+    QCheckBox, QGridLayout, QGraphicsDropShadowEffect, QInputDialog)
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_FILE = os.path.join(APP_DIR, "quick_copy_data.json")
+CONFIG_FILE = os.path.join(APP_DIR, "verify_config.json")
+
+# ---------- 配色 ----------
+ACCENT = "#4263eb"
+ACCENT_D = "#3651c9"
+BG = "#eef1f7"
+CARD = "#ffffff"
+BORDER = "#e3e7ef"
+TEXT = "#232a3a"
+MUTED = "#8b94a7"
+
+WIDTH = 320
+
+EMAIL_HOSTS = {
+    "163.com": "imap.163.com", "126.com": "imap.126.com",
+    "qq.com": "imap.qq.com", "foxmail.com": "imap.qq.com",
+    "gmail.com": "imap.gmail.com",
+    "outlook.com": "outlook.office365.com",
+    "hotmail.com": "outlook.office365.com", "sina.com": "imap.sina.com",
+}
+CODE_NEAR_RE = re.compile(
+    r"(?:验证码|校验码|校验代码|验证代码|动态码|verification code|security code|confirm code|otp|code)"
+    r"[^\dA-Za-z]{0,12}(\d{4,8})", re.IGNORECASE)
+NUM_RE = re.compile(r"(?<!\d)(\d{4,8})(?!\d)")
+
+QSS = f"""
+QWidget {{ font-family: "Microsoft YaHei UI"; color: {TEXT}; font-size: 9pt; }}
+#root {{ background: {BG}; border-radius: 12px; }}
+#titlebar {{ background: {ACCENT}; border-top-left-radius:12px;
+             border-top-right-radius:12px; }}
+#title {{ color:#fff; font-size:10pt; font-weight:700; }}
+#tbtn {{ background:transparent; color:#fff; border:none;
+         border-radius:7px; padding:4px 8px; font-size:9pt; }}
+#tbtn:hover {{ background: rgba(255,255,255,0.20); }}
+#tbtn:pressed {{ background: rgba(255,255,255,0.32); }}
+.card, #card {{ background:{CARD}; border:1px solid {BORDER}; border-radius:10px; }}
+QComboBox {{ background:{CARD}; border:1px solid {BORDER}; border-radius:8px;
+             padding:4px 8px; min-height:18px; }}
+QComboBox:hover {{ border-color:#b9c9ff; }}
+QComboBox::drop-down {{ border:none; width:18px; }}
+QComboBox QAbstractItemView {{ background:#fff; border:1px solid {BORDER};
+    selection-background-color:#eef3ff; selection-color:{ACCENT};
+    outline:none; border-radius:6px; padding:4px; }}
+#gbtn {{ background:transparent; border:none; color:{ACCENT};
+         font-weight:700; padding:3px 5px; border-radius:6px; }}
+#gbtn:hover {{ background:#e6edff; }}
+.mini, #mini {{ background:{ACCENT}; color:#fff; border:none; border-radius:7px;
+         padding:5px 10px; font-size:8.5pt; }}
+.mini:hover, #mini:hover {{ background:{ACCENT_D}; }}
+.mini:pressed, #mini:pressed {{ background:#2c45ad; }}
+#code {{ background:#f6f8fe; border:1px solid #dfe6f5; border-radius:8px;
+         font-family:Consolas; font-size:18pt; font-weight:700;
+         color:{ACCENT}; padding:4px; }}
+.row, #row {{ background:#fff; border:1px solid #e6eaf2; border-radius:8px; }}
+.row:hover, #row:hover {{ background:#f1f5ff; border-color:#c2d2ff; }}
+.row QLabel, #row QLabel {{ background:transparent; }}
+#rbtn {{ background:transparent; border:none; color:{MUTED};
+         padding:2px 4px; border-radius:5px; }}
+#rbtn:hover {{ background:#e7edff; color:{ACCENT}; }}
+QScrollArea {{ border:none; background:transparent; }}
+#body,#rowshost {{ background:transparent; }}
+QScrollBar:vertical {{ background:transparent; width:8px; margin:2px; }}
+QScrollBar::handle:vertical {{ background:#cfd6e4; border-radius:4px;
+                               min-height:36px; }}
+QScrollBar::handle:vertical:hover {{ background:#aab4c8; }}
+QScrollBar::add-line,QScrollBar::sub-line {{ height:0; }}
+QScrollBar::add-sub,QScrollBar::sub-page {{ background:transparent; }}
+#footer {{ color:{MUTED}; font-size:8pt; }}
+QLineEdit,QSpin {{ background:#fff; border:1px solid {BORDER};
+    border-radius:7px; padding:5px 8px; }}
+QLineEdit:focus {{ border-color:{ACCENT}; }}
+QCheckBox {{ spacing:6px; }}
+QDialog {{ background:{BG}; }}
+#dlgbtn {{ background:{ACCENT}; color:#fff; border:none; border-radius:7px;
+           padding:6px 14px; }}
+#dlgbtn:hover {{ background:{ACCENT_D}; }}
+#dlgbtn2 {{ background:#e7eaf1; color:#555; border:none; border-radius:7px;
+            padding:6px 14px; }}
+#dlgbtn2:hover {{ background:#d9deea; }}
+#swatch {{ border:1px solid #d5dbe6; border-radius:6px; max-width:26px;
+           min-height:22px; }}
+"""
+
+
+# ================= 后端：DPAPI =================
+class _Blob(ctypes.Structure):
+    _fields_ = [("cbData", ctypes.wintypes.DWORD),
+                ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+
+def dpapi_protect(text):
+    raw = text.encode("utf-8")
+    inb = _Blob(len(raw), ctypes.cast(ctypes.c_char_p(raw),
+                                      ctypes.POINTER(ctypes.c_char)))
+    out = _Blob()
+    if not ctypes.windll.crypt32.CryptProtectData(
+            ctypes.byref(inb), None, None, None, None, 0, ctypes.byref(out)):
+        raise ctypes.WinError()
+    b = ctypes.string_at(out.pbData, out.cbData)
+    ctypes.windll.kernel32.LocalFree(out.pbData)
+    return base64.b64encode(b).decode()
+
+
+def dpapi_unprotect(b64):
+    blob = base64.b64decode(b64)
+    inb = _Blob(len(blob), ctypes.cast(ctypes.c_char_p(blob),
+                                       ctypes.POINTER(ctypes.c_char)))
+    out = _Blob()
+    if not ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(inb), None, None, None, None, 0, ctypes.byref(out)):
+        raise ctypes.WinError()
+    raw = ctypes.string_at(out.pbData, out.cbData)
+    ctypes.windll.kernel32.LocalFree(out.pbData)
+    return raw.decode("utf-8")
+
+
+# ================= 后端：邮件 =================
+def _decoded_str(raw):
+    if raw is None:
+        return ""
+    out = []
+    for t, enc in decode_header(raw):
+        if isinstance(t, bytes):
+            out.append(t.decode(enc or "utf-8", errors="replace"))
+        else:
+            out.append(t)
+    return "".join(out)
+
+
+def _msg_text(msg):
+    chunks = []
+    for part in (msg.walk() if msg.is_multipart() else [msg]):
+        if msg.is_multipart() and part.get_content_type() not in (
+                "text/plain", "text/html"):
+            continue
+        p = part.get_payload(decode=True)
+        if p:
+            chunks.append(p.decode(part.get_content_charset() or "utf-8",
+                                   errors="replace"))
+    return re.sub(r"<[^>]+>", " ", "\n".join(chunks))
+
+
+def extract_code(text):
+    m = CODE_NEAR_RE.search(text)
+    if m:
+        return m.group(1)
+    c = NUM_RE.findall(text)
+    return c[0] if c else None
+
+
+@contextmanager
+def ipv4_only():
+    orig = socket.getaddrinfo
+
+    def f(host, port=0, family=0, type_=0, proto=0, flags=0):
+        return [i for i in orig(host, port, family, type_, proto, flags)
+                if i[0] == socket.AF_INET]
+    socket.getaddrinfo = f
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = orig
+
+
+def _netease(M, cfg):
+    M.login(cfg["addr"], dpapi_unprotect(cfg["secret"]))
+    if any(k in cfg["host"] for k in ("163.com", "126.com", "netease")):
+        # imaplib 的命令状态表默认不含扩展命令 ID，需先登记否则 KeyError
+        imaplib.Commands.setdefault("ID", ("AUTH", "SELECTED", "LOGOUT"))
+        payload = '("name" "QuickDesk" "version" "3" "vendor" "local")'
+        t, d = M._simple_command("ID", payload)
+        M._untagged_response(t, d, "ID")
+
+
+def _inbox(M):
+    t, d = M.select("INBOX", readonly=True)
+    if t != "OK":
+        raise RuntimeError(f"打开收件箱失败 {d}")
+
+
+def imap_baseline(cfg):
+    with ipv4_only():
+        M = imaplib.IMAP4_SSL(cfg["host"], 993, timeout=12)
+    _netease(M, cfg); _inbox(M)
+    t, d = M.uid("search", "ALL")
+    if t != "OK":
+        raise RuntimeError(f"SEARCH 失败 {d}")
+    u = [int(x) for x in d[0].split() if x.isdigit()]
+    M.logout()
+    return max(u) if u else 0
+
+
+def imap_fetch(cfg):
+    base = int(cfg.get("base_uid", 0))
+    with ipv4_only():
+        M = imaplib.IMAP4_SSL(cfg["host"], 993, timeout=12)
+    _netease(M, cfg); _inbox(M)
+    t, d = M.uid("search", "UID", f"{base+1}:*")
+    if t != "OK":
+        M.logout(); raise RuntimeError(f"SEARCH 失败 {d}")
+    uids = [x for x in d[0].split() if x.isdigit()]
+    for uid in reversed(uids):
+        if int(uid) <= base:
+            continue
+        t, md = M.uid("fetch", uid, "(RFC822)")
+        if not md or not md[0]:
+            continue
+        msg = email.message_from_bytes(md[0][1])
+        code = extract_code(_decoded_str(msg.get("Subject")) + "\n"
+                            + _msg_text(msg))
+        if code:
+            try:
+                ts = parsedate_to_datetime(msg.get("Date")).timestamp()
+            except Exception:
+                ts = time.time()
+            M.logout()
+            return int(uid), code, ts
+    M.logout()
+    return None
+
+
+# ================= 后端：ADB =================
+def find_adb():
+    p = shutil.which("adb")
+    if p:
+        return p
+    local = os.path.join(APP_DIR, "adb", "adb.exe")
+    return local if os.path.exists(local) else None
+
+
+def adb_devices():
+    adb = find_adb()
+    if not adb:
+        return None, []
+    out = subprocess.run([adb, "devices"], capture_output=True, timeout=10)
+    devs = []
+    for line in out.stdout.decode("utf-8", "replace").splitlines()[1:]:
+        p = line.strip().split("\t")
+        if len(p) == 2 and p[1] == "device":
+            devs.append(p[0])
+    return adb, devs
+
+
+def sms_fetch(cfg):
+    adb = find_adb()
+    cmd = [adb]
+    if cfg.get("serial"):
+        cmd += ["-s", cfg["serial"]]
+    cmd += ["shell", "content", "query", "--uri", "content://sms/inbox",
+            "--projection", "date,body", "--sort", "date DESC LIMIT 15"]
+    out = subprocess.run(cmd, capture_output=True, timeout=12)
+    base = int(cfg.get("base_date", 0))
+    for line in out.stdout.decode("utf-8", "replace").splitlines():
+        m = re.match(r"Row:\s*\d+\s*date=(\d+)\s*body=(.*)", line, re.S)
+        if not m:
+            continue
+        dms, body = int(m.group(1)), m.group(2).rstrip(",")
+        if dms <= base:
+            continue
+        code = extract_code(body)
+        if code:
+            return dms, code
+    return None
+
+
+def install_adb(cb):
+    urls = [
+        "https://dl.google.com/android/repository/platform-tools-latest-windows.zip",
+        "https://mirrors.bfsu.edu.cn/android/repository/platform-tools-latest-windows.zip",
+        "https://mirrors.tuna.tsinghua.edu.cn/android/repository/platform-tools-latest-windows.zip"]
+    zp = os.path.join(APP_DIR, "platform-tools.zip")
+    last = None
+    for u in urls:
+        try:
+            cb(f"下载中 {u.split('/')[2]}…")
+            req = urllib.request.Request(u,
+                                         headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=60) as r, \
+                    open(zp, "wb") as f:
+                f.write(r.read())
+            break
+        except Exception as e:
+            last = e
+    else:
+        raise RuntimeError(f"全部源失败 {last}")
+    cb("解压中…")
+    with zipfile.ZipFile(zp) as z:
+        z.extractall(APP_DIR)
+    dst = os.path.join(APP_DIR, "adb")
+    if os.path.exists(dst):
+        shutil.rmtree(dst)
+    os.rename(os.path.join(APP_DIR, "platform-tools"), dst)
+    os.remove(zp)
+    cb("adb 安装完成")
+
+
+# ================= 字段编辑对话框 =================
+COLOR_CHOICES = ["#333333", "#e53935", ACCENT, "#2e9b46",
+                 "#f08c1a", "#8e44ad"]
+
+
+class FieldDialog(QDialog):
+    def __init__(self, parent, item=None):
+        super().__init__(parent)
+        self.setWindowTitle("编辑条目")
+        self.setFixedWidth(290)
+        self.picked = item.get("color", "#666666") if item else "#666666"
+        lay = QVBoxLayout(self); lay.setSpacing(8); lay.setContentsMargins(14,14,14,14)
+
+        self.e_name = QLineEdit(item["name"] if item else "")
+        self.e_name.setPlaceholderText("字段名（组内唯一）")
+        self.e_val = QLineEdit(item["value"] if item else "")
+        self.e_val.setPlaceholderText("内容")
+        lay.addWidget(self.e_name); lay.addWidget(self.e_val)
+
+        row = QHBoxLayout()
+        self.cb_bold = QCheckBox("加粗 key")
+        self.cb_bold.setChecked(bool(item and item.get("bold")))
+        row.addWidget(self.cb_bold); row.addStretch()
+        self.sw = {}
+        for c in COLOR_CHOICES:
+            b = QPushButton(); b.setObjectName("swatch")
+            b.setStyleSheet(f"background:{c};")
+            b.setCheckable(True)
+            b.clicked.connect(lambda _, col=c: self.pick(col))
+            row.addWidget(b); self.sw[c] = b
+        lay.addLayout(row)
+        self.pick(self.picked)
+
+        bs = QHBoxLayout(); bs.addStretch()
+        no = QPushButton("取消"); no.setObjectName("dlgbtn2")
+        no.clicked.connect(self.reject)
+        ok = QPushButton("确定"); ok.setObjectName("dlgbtn")
+        ok.clicked.connect(self.accept)
+        bs.addWidget(no); bs.addWidget(ok)
+        lay.addLayout(bs)
+
+    def pick(self, c):
+        self.picked = c
+        for col, b in self.sw.items():
+            b.setChecked(col == c)
+            b.setText("✓" if col == c else "")
+            b.setStyleSheet(
+                f"background:{col}; color:#fff;"
+                f"border:2px solid {'#222' if col==c else '#d5dbe6'};")
+
+    def result_item(self):
+        return {"name": self.e_name.text().strip() or "未命名",
+                "value": self.e_val.text().strip(),
+                "bold": self.cb_bold.isChecked(), "color": self.picked}
+
+
+# ================= 绑定对话框 =================
+class BindDialog(QDialog):
+    def __init__(self, app):
+        super().__init__(app)
+        self.app = app
+        self.setWindowTitle("绑定邮箱 / 手机")
+        self.setFixedWidth(320)
+        lay = QVBoxLayout(self); lay.setSpacing(7); lay.setContentsMargins(16,14,16,14)
+
+        lay.addWidget(QLabel("① 邮箱（自动获取邮件验证码）"))
+        self.e_addr = QLineEdit(); self.e_addr.setPlaceholderText("邮箱地址")
+        self.e_sec = QLineEdit(); self.e_sec.setPlaceholderText("IMAP 授权码（非登录密码）")
+        self.e_host = QLineEdit(); self.e_host.setPlaceholderText("IMAP 服务器")
+        old = app.verify_cfg.get("email")
+        if old:
+            self.e_addr.setText(old.get("addr",""))
+            self.e_host.setText(old.get("host",""))
+        self.e_addr.textChanged.connect(self.auto_host)
+        lay.addWidget(self.e_addr); lay.addWidget(self.e_sec); lay.addWidget(self.e_host)
+        b1 = QPushButton("保存并绑定邮箱"); b1.setObjectName("dlgbtn")
+        b1.clicked.connect(self.save_email); lay.addWidget(b1)
+        self.mail_st = QLabel(""); self.mail_st.setStyleSheet(f"color:{ACCENT};")
+        lay.addWidget(self.mail_st)
+
+        lay.addWidget(QLabel("② 安卓手机（短信验证码 / USB 或无线）"))
+        g = QGridLayout(); g.setSpacing(6)
+        self.e_pair = QLineEdit(); self.e_pair.setPlaceholderText("无线配对 地址:端口")
+        self.e_pcode = QLineEdit(); self.e_pcode.setPlaceholderText("配对码")
+        self.e_conn = QLineEdit(); self.e_conn.setPlaceholderText("连接 地址:端口")
+        g.addWidget(self.e_pair,0,0,1,2); g.addWidget(self.e_pcode,1,0)
+        self.sms_st = QLabel(""); self.sms_st.setStyleSheet(f"color:{MUTED};")
+        g.addWidget(self.e_pcode,1,1); g.addWidget(self.e_conn,2,0,1,2)
+        lay.addLayout(g)
+        r = QHBoxLayout()
+        for t, fn in (("检测", self.check), ("配对", self.pair),
+                      ("连接", self.connect), ("下载adb", self.dl_adb),
+                      ("绑定设备", self.bind)):
+            b = QPushButton(t); b.setObjectName("dlgbtn"); b.clicked.connect(fn)
+            r.addWidget(b)
+        lay.addLayout(r)
+        lay.addWidget(self.sms_st)
+
+        close = QPushButton("关闭"); close.setObjectName("dlgbtn2")
+        close.clicked.connect(self.accept)
+        lay.addWidget(close)
+        self.check()
+
+    def auto_host(self, t):
+        if "@" in t:
+            h = EMAIL_HOSTS.get(t.split("@",1)[1].lower())
+            if h and not self.e_host.text():
+                self.e_host.setText(h)
+
+    def save_email(self):
+        a, s, h = self.e_addr.text().strip(), self.e_sec.text().strip(), \
+                  self.e_host.text().strip()
+        if not (a and s and h):
+            self.mail_st.setText("三项都要填"); self.mail_st.setStyleSheet("color:#e53935;")
+            return
+        cfg = {"addr": a, "host": h, "secret": dpapi_protect(s),
+               "base_uid": 0}
+        self.mail_st.setText("登录建立基线…")
+
+        def work():
+            try:
+                cfg["base_uid"] = imap_baseline(cfg)
+                self.app.verify_cfg["email"] = cfg
+                self.app.save_verify_cfg()
+                self.mail_st.setText(f"绑定成功 基线UID={cfg['base_uid']}")
+                self.mail_st.setStyleSheet(f"color:{ACCENT};")
+            except Exception as ex:
+                self.mail_st.setText(f"失败：{str(ex)[:50]}")
+                self.mail_st.setStyleSheet("color:#e53935;")
+        threading.Thread(target=work, daemon=True).start()
+
+    def check(self):
+        self.sms_st.setText("检测中…")
+        def work():
+            _, devs = adb_devices()
+            if not find_adb():
+                t, c = "未检测到adb，可下载", "#e53935"
+            elif not devs:
+                t, c = "adb就绪，暂无设备", "#e53935"
+            else:
+                t, c = "已连接：" + "、".join(devs), ACCENT
+            self.sms_st.setText(t); self.sms_st.setStyleSheet(f"color:{c};")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _adb(self, args):
+        adb = find_adb()
+        if not adb:
+            self.sms_st.setText("未装adb"); return
+        def work():
+            try:
+                out = subprocess.run([adb]+args, capture_output=True, timeout=30)
+                t = (out.stdout.decode("utf-8","replace") +
+                     out.stderr.decode("utf-8","replace")).strip()
+                self.sms_st.setText(t[:90] or "完成")
+            except Exception as e:
+                self.sms_st.setText(str(e)[:60])
+        threading.Thread(target=work, daemon=True).start()
+
+    def pair(self):
+        a, c = self.e_pair.text().strip(), self.e_pcode.text().strip()
+        if a and c: self._adb(["pair", a, c])
+
+    def connect(self):
+        a = self.e_conn.text().strip() or self.e_pair.text().strip()
+        if a: self._adb(["connect", a])
+
+    def dl_adb(self):
+        def work():
+            try:
+                install_adb(lambda m: self.sms_st.setText(m))
+            except Exception as e:
+                self.sms_st.setText("失败："+str(e)[:45])
+        threading.Thread(target=work, daemon=True).start()
+
+    def bind(self):
+        _, devs = adb_devices()
+        if not devs:
+            self.sms_st.setText("没有已连接设备"); return
+        self.app.verify_cfg["sms"] = {"serial": devs[0],
+                                      "base_date": int(time.time()*1000)}
+        self.app.save_verify_cfg()
+        self.sms_st.setText(f"已绑定 {devs[0]}")
+
+
+# ================= 字段行卡片 =================
+class RowCard(QFrame):
+    def __init__(self, main, idx, item):
+        super().__init__()
+        self.setObjectName("row")
+        self.main, self.idx = main, idx
+        h = QHBoxLayout(self); h.setContentsMargins(8,3,6,3); h.setSpacing(6)
+
+        key_font = QFont("Microsoft YaHei UI", 9)
+        key_font.setBold(bool(item.get("bold")))
+        self.k = QLabel(item["name"]); self.k.setFont(key_font)
+        self.k.setStyleSheet(f"color:{item.get('color','#666')};")
+        self.k.setFixedWidth(78); self.k.setAlignment(Qt.AlignRight
+                                                      | Qt.AlignVCenter)
+        self.v = QLabel(); self.v.setMinimumWidth(90)
+        self._set_value_text(item)
+        b_edit = QPushButton("✎"); b_edit.setObjectName("rbtn")
+        b_del = QPushButton("✕"); b_del.setObjectName("rbtn")
+        b_edit.clicked.connect(lambda: main.click_edit(idx))
+        b_del.clicked.connect(lambda: main.click_delete(idx, b_del))
+        h.addWidget(self.k); h.addWidget(self.v, 1)
+        h.addWidget(b_edit); h.addWidget(b_del)
+        self._del_arm = False
+
+    def _set_value_text(self, item):
+        if self.main.masked:
+            self.v.setText("••••••" if item["value"] else "（空）")
+        else:
+            val = item["value"] or "（空，点✎填写）"
+            self.v.setText(val[:24] + ("…" if len(val) > 24 else ""))
+
+    def mousePressEvent(self, e):
+        self.main.do_copy(self.idx)
+
+    def delete_armed(self):
+        return self._del_arm
+
+    def arm(self, on, btn):
+        self._del_arm = on
+        btn.setText("确认?" if on else "✕")
+        btn.setStyleSheet("color:#e53935;" if on else "")
+
+
+# ================= 主窗口 =================
+class MainWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.groups = []
+        self.active_group = 0
+        self.pos_xy = None
+        self.collapsed = False
+        self.pin_on = True
+        self.masked = False
+        self.verify_cfg = {"show_panel": True, "email": None, "sms": None}
+        self._drag = None
+        self._watch = None; self._watch_left = 0
+        self._current_code = ""
+        self.rows = []
+
+        self.load_data(); self.load_verify_cfg()
+
+        self.setWindowFlags(Qt.FramelessWindowHint |
+                            (Qt.WindowStaysOnTopHint if self.pin_on else 0))
+        self.setFixedWidth(WIDTH)
+
+        outer = QVBoxLayout(self); outer.setContentsMargins(0,0,0,0)
+        self.root = QFrame(); self.root.setObjectName("root")
+        outer.addWidget(self.root)
+
+        rl = QVBoxLayout(self.root); rl.setContentsMargins(0,0,0,8)
+        rl.setSpacing(4)
+        self.build_titlebar(rl)
+        self.body = QFrame(); self.body.setObjectName("body")
+        bl = QVBoxLayout(self.body); bl.setContentsMargins(10,4,10,0)
+        bl.setSpacing(6)
+        self.build_groupbar(bl)
+        self.build_vpanel(bl)
+        self.build_rows_area(bl)
+        self.footer = QLabel("点条目复制 · 数据本地保存")
+        self.footer.setObjectName("footer")
+        bl.addWidget(self.footer)
+        rl.addWidget(self.body)
+
+        self.refresh_groups(); self.refresh_rows(); self.adjust_height()
+        if not self.verify_cfg.get("show_panel", True):
+            self.vpanel.hide()
+        if self.collapsed:
+            self.body.hide()
+        x, y = self.pos_xy or (90, 120)
+        self.move(x, y)
+
+        # Win11 圆角 + 原生阴影（给无边框窗口补回 CAPTION/THICKFRAME 样式）
+        try:
+            hwnd = int(self.winId())
+            GWL_STYLE = -16
+            WS_CAPTION, WS_THICKFRAME = 0x00C00000, 0x00040000
+            cur = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+            ctypes.windll.user32.SetWindowLongW(
+                hwnd, GWL_STYLE, cur | WS_CAPTION | WS_THICKFRAME)
+            DWM_WCP = 33; DWMWCP_ROUND = 2
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, DWM_WCP,
+                ctypes.byref(ctypes.c_int(DWMWCP_ROUND)),
+                ctypes.sizeof(ctypes.c_int))
+        except Exception:
+            pass
+
+        def warm():
+            a = find_adb()
+            if a: subprocess.run([a,"start-server"], capture_output=True)
+        threading.Thread(target=warm, daemon=True).start()
+
+    # ---------- 标题栏 ----------
+    def build_titlebar(self, parent_layout):
+        tb = QFrame(); tb.setObjectName("titlebar"); tb.setFixedHeight(40)
+        h = QHBoxLayout(tb); h.setContentsMargins(12,4,8,4)
+        title = QLabel("快捷工作台"); title.setObjectName("title")
+        title.setAttribute(Qt.WA_TransparentForMouseEvents)
+        h.addWidget(title); h.addStretch()
+        self.t_add = self.tb_btn("＋", self.click_add)
+        self.t_mask = self.tb_btn("隐", self.toggle_mask)
+        self.t_code = self.tb_btn("码", self.toggle_vpanel)
+        self.t_pin = self.tb_btn("📌", self.toggle_pin)
+        self.t_col = self.tb_btn("▼", self.toggle_collapse)
+        self.t_close = self.tb_btn("✕", self.close_win)
+        for b in (self.t_close,self.t_col,self.t_pin,self.t_code,
+                  self.t_mask,self.t_add):
+            h.addWidget(b)
+        self.t_mask.setText("显" if self.masked else "隐")
+        parent_layout.addWidget(tb)
+        self.titlebar = tb
+        tb.installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        if obj is self.titlebar:
+            if ev.type() == QEvent.MouseButtonPress and ev.button()==Qt.LeftButton:
+                self._drag = ev.globalPosition().toPoint()-self.pos()
+            elif ev.type() == QEvent.MouseMove and self._drag is not None:
+                self.move(ev.globalPosition().toPoint()-self._drag)
+            elif ev.type() == QEvent.MouseButtonRelease:
+                self._drag = None
+                self.pos_xy = [self.x(), self.y()]; self.save_data()
+        return False
+
+    def tb_btn(self, text, fn):
+        b = QPushButton(text); b.setObjectName("tbtn")
+        b.setCursor(Qt.PointingHandCursor); b.clicked.connect(fn)
+        return b
+
+    # ---------- 分组栏 ----------
+    def build_groupbar(self, layout):
+        g = QHBoxLayout(); g.setSpacing(2)
+        self.cb = QComboBox()
+        self.cb.setMinimumHeight(28)
+        self.cb.currentIndexChanged.connect(self.on_group)
+        g.addWidget(self.cb, 1)
+        for t, fn in (("＋", self.add_group), ("✎", self.rename_group),
+                      ("✕", self.delete_group)):
+            b = QPushButton(t); b.setObjectName("gbtn")
+            b.setCursor(Qt.PointingHandCursor); b.clicked.connect(fn)
+            g.addWidget(b)
+        layout.addLayout(g)
+
+    def refresh_groups(self):
+        self.cb.blockSignals(True)
+        self.cb.clear()
+        for g in self.groups:
+            self.cb.addItem(g["name"])
+        self.cb.setCurrentIndex(self.active_group)
+        self.cb.blockSignals(False)
+
+    def on_group(self, i):
+        self.active_group = i
+        self.refresh_rows(); self.save_data()
+
+    @property
+    def fields(self):
+        return self.groups[self.active_group]["fields"]
+
+    def add_group(self):
+        nm, ok = QInputDialog.getText(self, "新建组", "组名：")
+        nm = nm.strip()
+        if ok and nm:
+            if any(g["name"] == nm for g in self.groups):
+                self.flash("组名已存在", True); return
+            self.groups.append({"name": nm, "fields": []})
+            self.active_group = len(self.groups)-1
+            self.refresh_groups(); self.refresh_rows(); self.save_data()
+
+    def rename_group(self):
+        cur = self.groups[self.active_group]
+        nm, ok = QInputDialog.getText(self, "改名", "新组名：", text=cur["name"])
+        nm = nm.strip()
+        if ok and nm:
+            self.groups[self.active_group]["name"] = nm
+            self.refresh_groups(); self.save_data()
+
+    def delete_group(self):
+        if len(self.groups) <= 1:
+            self.flash("至少保留一个组", True); return
+        del self.groups[self.active_group]
+        self.active_group = max(0, self.active_group-1)
+        self.refresh_groups(); self.refresh_rows(); self.save_data()
+
+    # ---------- 验证码面板 ----------
+    def build_vpanel(self, layout):
+        card = QFrame(); card.setObjectName("card")
+        v = QVBoxLayout(card); v.setContentsMargins(10,8,10,10); v.setSpacing(6)
+        v.addWidget(QLabel("验证码助手"))
+        self.code_lbl = QLabel("———"); self.code_lbl.setObjectName("code")
+        self.code_lbl.setAlignment(Qt.AlignCenter)
+        self.code_lbl.setCursor(Qt.PointingHandCursor)
+        self.code_lbl.mousePressEvent = lambda e: self.copy_code()
+        v.addWidget(self.code_lbl)
+        r = QHBoxLayout()
+        for t, fn in (("邮箱", self.fetch_email), ("短信", self.fetch_sms),
+                      ("绑定", self.open_bind), ("停止", self.stop_watch)):
+            b = QPushButton(t); b.setObjectName("mini" if t!="停止" else "mini")
+            b.setCursor(Qt.PointingHandCursor); b.clicked.connect(fn)
+            r.addWidget(b)
+        v.addLayout(r)
+        self.code_st = QLabel("未获取"); self.code_st.setStyleSheet(f"color:{MUTED};")
+        v.addWidget(self.code_st)
+        self.vpanel = card
+        layout.addWidget(card)
+
+    def toggle_vpanel(self):
+        if self.vpanel.isVisible():
+            self.vpanel.hide(); self.verify_cfg["show_panel"] = False
+            self.stop_watch()
+        else:
+            self.vpanel.show(); self.verify_cfg["show_panel"] = True
+        self.save_verify_cfg(); self.adjust_height()
+
+    def code_status(self, t, c=MUTED):
+        self.code_st.setText(t); self.code_st.setStyleSheet(f"color:{c};")
+
+    def copy_code(self):
+        if not self._current_code:
+            self.code_status("还没有验证码", "#e53935"); return
+        QApplication.clipboard().setText(self._current_code)
+        self.code_status(f"已复制 {self._current_code}", ACCENT)
+
+    def fetch_email(self):
+        cfg = self.verify_cfg.get("email")
+        if not cfg:
+            self.code_status("请先绑定邮箱", "#e53935"); self.open_bind(); return
+        self.code_status("查询邮箱中…")
+        self.start_watch("email")
+        threading.Thread(target=self.email_worker, args=(cfg,),
+                         daemon=True).start()
+
+    def email_worker(self, cfg):
+        try:
+            r = imap_fetch(cfg)
+            if r:
+                uid, code, ts = r
+                self._found(code, "email", ts, uid)
+            else:
+                self._none()
+        except Exception as e:
+            self._fail("邮箱", str(e))
+
+    def fetch_sms(self):
+        cfg = self.verify_cfg.get("sms")
+        if not cfg:
+            self.code_status("请先绑定手机", "#e53935"); self.open_bind(); return
+        _, devs = adb_devices()
+        if not devs:
+            self.code_status("手机未连接", "#e53935"); return
+        self.code_status("读取短信中…")
+        self.start_watch("sms")
+        threading.Thread(target=self.sms_worker, args=(cfg,),
+                         daemon=True).start()
+
+    def sms_worker(self, cfg):
+        try:
+            r = sms_fetch(cfg)
+            if r:
+                dms, code = r
+                self._found(code, "sms", dms/1000, dms)
+            else:
+                self._none()
+        except Exception as e:
+            self._fail("短信", str(e))
+
+    def _found(self, code, src, ts, advance):
+        self._current_code = code
+        self.code_lbl.setText(code)
+        self.stop_watch()
+        QApplication.clipboard().setText(code)
+        if src == "email":
+            self.verify_cfg["email"]["base_uid"] = advance
+        else:
+            self.verify_cfg["sms"]["base_date"] = advance
+        self.save_verify_cfg()
+        ago = max(0, int(time.time()-ts))
+        tag = "邮箱" if src=="email" else "短信"
+        self.code_status(f"{tag}验证码已获取并自动复制（{ago}秒前）", ACCENT)
+
+    def start_watch(self, src):
+        self.stop_watch(); self._watch_src = src; self._watch_left = 25
+
+    def _none(self):
+        if self._watch_left <= 0: return
+        self._watch_left -= 1
+        if self._watch_left <= 0:
+            self.code_status("等待超时：未收到新验证码", "#e53935"); return
+        self.code_status(f"等待新验证码…（{self._watch_left*3}s）")
+        self._watch = threading.Timer(3.0, self._retry); self._watch.start()
+
+    def _retry(self):
+        if self._watch_src == "email":
+            cfg = self.verify_cfg.get("email")
+            if cfg: threading.Thread(target=self.email_worker,args=(cfg,),daemon=True).start()
+        else:
+            cfg = self.verify_cfg.get("sms")
+            if cfg: threading.Thread(target=self.sms_worker,args=(cfg,),daemon=True).start()
+
+    def _fail(self, tag, msg):
+        self.stop_watch(); self.code_status(f"{tag}失败：{msg[:45]}", "#e53935")
+
+    def stop_watch(self):
+        if self._watch: self._watch.cancel(); self._watch = None
+        self._watch_left = 0
+
+    def open_bind(self):
+        BindDialog(self).exec()
+
+    # ---------- 行区域 ----------
+    def build_rows_area(self, layout):
+        self.scroll = QScrollArea(); self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.rows_host = QWidget(); self.rows_host.setObjectName("rowshost")
+        self.rows_lay = QVBoxLayout(self.rows_host)
+        self.rows_lay.setContentsMargins(2,2,6,2); self.rows_lay.setSpacing(4)
+        self.rows_lay.addStretch()
+        self.scroll.setWidget(self.rows_host)
+        layout.addWidget(self.scroll)
+
+    def refresh_rows(self):
+        while self.rows_lay.count() > 1:
+            it = self.rows_lay.takeAt(0)
+            w = it.widget()
+            if w: w.deleteLater()
+        self.rows = []
+        if not self.fields:
+            empty = QLabel("本组还没有条目\n点标题栏 ＋ 添加")
+            empty.setAlignment(Qt.AlignCenter)
+            empty.setStyleSheet(f"color:{MUTED}; padding:16px;")
+            self.rows_lay.insertWidget(0, empty)
+        else:
+            for i, item in enumerate(self.fields):
+                rc = RowCard(self, i, item)
+                self.rows_lay.insertWidget(i, rc); self.rows.append(rc)
+        self.adjust_height()
+
+    # ---------- 复制/增改删 ----------
+    def do_copy(self, idx):
+        t = self.fields[idx]["value"]
+        if not t:
+            self.flash("该条目为空，点 ✎ 填写", True); return
+        QApplication.clipboard().setText(t)
+        self.flash(f"已复制【{self.fields[idx]['name']}】")
+
+    def click_add(self):
+        dlg = FieldDialog(self)
+        if dlg.exec():
+            item = dlg.result_item()
+            if any(f["name"] == item["name"] for f in self.fields):
+                self.flash(f"“{item['name']}”已存在，必须唯一", True); return
+            self.fields.append(item); self.refresh_rows(); self.save_data()
+
+    def click_edit(self, idx):
+        dlg = FieldDialog(self, self.fields[idx])
+        if dlg.exec():
+            item = dlg.result_item()
+            for i, f in enumerate(self.fields):
+                if i != idx and f["name"] == item["name"]:
+                    self.flash("组内名称重复", True); return
+            self.fields[idx] = item; self.refresh_rows(); self.save_data()
+
+    def click_delete(self, idx, btn):
+        rc = self.rows[idx]
+        if rc.delete_armed():
+            del self.fields[idx]; self.refresh_rows(); self.save_data()
+        else:
+            rc.arm(True, btn)
+            def back():
+                if idx < len(self.rows) and self.rows[idx] is rc:
+                    rc.arm(False, btn)
+            threading.Timer(2.0, back).start()
+
+    # ---------- 窗口行为 ----------
+    def adjust_height(self):
+        QApplication.processEvents()
+        n = max(len(self.fields), 1)
+        rows_h = min(n*38+8, 330)
+        h = 40 + 8
+        if not self.collapsed:
+            h += rows_h
+            if self.verify_cfg.get("show_panel", True):
+                h += 132
+            h += 34
+        self.setFixedHeight(h+24)
+
+    def toggle_collapse(self):
+        self.collapsed = not self.collapsed
+        self.body.setVisible(not self.collapsed)
+        self.t_col.setText("▲" if self.collapsed else "▼")
+        self.adjust_height(); self.save_data()
+
+    def toggle_pin(self):
+        self.pin_on = not self.pin_on
+        flags = Qt.FramelessWindowHint | (Qt.WindowStaysOnTopHint
+                                          if self.pin_on else 0)
+        self.setWindowFlags(flags)
+        self.show()
+        self.save_data()
+
+    def toggle_mask(self):
+        self.masked = not self.masked
+        self.t_mask.setText("显" if self.masked else "隐")
+        self.refresh_rows(); self.save_data()
+
+    def flash(self, t, warn=False):
+        self.footer.setText(t)
+        self.footer.setStyleSheet(f"color:{'#e53935' if warn else ACCENT};")
+        def back():
+            self.footer.setText("点条目复制 · 数据本地保存")
+            self.footer.setStyleSheet(f"color:{MUTED};")
+        threading.Timer(1.6, back).start()
+
+    # 拖动
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._drag = e.globalPosition().toPoint()-self.pos()
+
+    def mouseMoveEvent(self, e):
+        if self._drag:
+            self.move(e.globalPosition().toPoint()-self._drag)
+
+    def mouseReleaseEvent(self, e):
+        self.pos_xy = [self.x(), self.y()]; self.save_data()
+
+    # 持久化
+    def load_data(self):
+        d = None
+        if os.path.exists(DATA_FILE):
+            try:
+                d = json.load(open(DATA_FILE, encoding="utf-8"))
+            except Exception:
+                d = None
+        if d and d.get("groups"):
+            self.groups = d["groups"]
+            self.active_group = min(d.get("active_group",0),len(self.groups)-1)
+            self.pos_xy = d.get("pos"); self.collapsed = d.get("collapsed",False)
+            self.pin_on = d.get("pin_on",True); self.masked = d.get("masked",False)
+        elif d and d.get("fields"):
+            self.groups = [{"name":"求职信息","fields":d["fields"]},
+                           {"name":"应用密码","fields":[]}]
+        else:
+            self.groups = [{"name":"求职信息","fields":[]},
+                           {"name":"应用密码","fields":[]}]
+
+    def save_data(self):
+        json.dump({"groups":self.groups,"active_group":self.active_group,
+                   "pos":[self.x(),self.y()],"collapsed":self.collapsed,
+                   "pin_on":self.pin_on,"masked":self.masked},
+                  open(DATA_FILE,"w",encoding="utf-8"),
+                  ensure_ascii=False, indent=2)
+
+    def load_verify_cfg(self):
+        if os.path.exists(CONFIG_FILE):
+            try:
+                self.verify_cfg.update(json.load(open(CONFIG_FILE,encoding="utf-8")))
+            except Exception:
+                pass
+
+    def save_verify_cfg(self):
+        json.dump(self.verify_cfg, open(CONFIG_FILE,"w",encoding="utf-8"),
+                  ensure_ascii=False, indent=2)
+
+    def close_win(self):
+        self.save_data(); self.close()
+
+
+def main():
+    app = QApplication([])
+    app.setStyleSheet(QSS)
+    w = MainWindow(); w.show()
+    app.exec()
+
+
+if __name__ == "__main__":
+    main()

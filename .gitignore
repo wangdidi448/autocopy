@@ -1,0 +1,12 @@
+# 敏感配置（含邮箱授权码，DPAPI 加密）与个人数据
+verify_config.json
+quick_copy_data.json
+
+# adb 运行时自动下载安装
+adb/
+platform-tools/
+platform-tools.zip
+
+# Python
+__pycache__/
+*.pyc
