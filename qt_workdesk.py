@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QFrame, QLabel, QPushButton, QVBoxLayout,
     QHBoxLayout, QComboBox, QScrollArea, QSizePolicy, QDialog, QLineEdit,
     QCheckBox, QGridLayout, QGraphicsDropShadowEffect, QInputDialog,
-    QFileDialog)
+    QFileDialog, QMessageBox)
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(APP_DIR, "quick_copy_data.json")
@@ -105,7 +105,7 @@ QLineEdit,QSpin {{ background:#fff; border:1px solid {BORDER};
     border-radius:7px; padding:5px 8px; }}
 QLineEdit:focus {{ border-color:{ACCENT}; }}
 QCheckBox {{ spacing:6px; }}
-QDialog {{ background:{BG}; }}
+QDialog,QMessageBox {{ background:{BG}; }}
 #dlgbtn {{ background:{ACCENT}; color:#fff; border:none; border-radius:7px;
            padding:6px 14px; }}
 #dlgbtn:hover {{ background:{ACCENT_D}; }}
@@ -566,7 +566,6 @@ class RowCard(QFrame):
         b_del.clicked.connect(lambda: main.click_delete(idx, b_del))
         h.addWidget(self.k); h.addWidget(self.v, 1)
         h.addWidget(b_edit); h.addWidget(b_del)
-        self._del_arm = False
         self._press = None; self._moved = False
         self.setCursor(Qt.PointingHandCursor)
 
@@ -598,14 +597,6 @@ class RowCard(QFrame):
         if e.button() == Qt.LeftButton and not self._moved:
             self.main.do_copy(self.idx)
         self._press = None
-
-    def delete_armed(self):
-        return self._del_arm
-
-    def arm(self, on, btn):
-        self._del_arm = on
-        btn.setText("确认?" if on else "✕")
-        btn.setStyleSheet("color:#e53935;" if on else "")
 
 
 # ================= 主窗口 =================
@@ -766,9 +757,26 @@ class MainWindow(QWidget):
     def delete_group(self):
         if len(self.groups) <= 1:
             self.flash("至少保留一个组", True); return
-        del self.groups[self.active_group]
-        self.active_group = max(0, self.active_group-1)
-        self.refresh_groups(); self.refresh_rows(); self.save_data()
+        cur = self.groups[self.active_group]
+        if self.confirm_delete(
+                f"确定删除整组「{cur['name']}」吗？",
+                f"组内 {len(cur['fields'])} 个条目会一起删除，且无法恢复。"):
+            del self.groups[self.active_group]
+            self.active_group = max(0, self.active_group-1)
+            self.refresh_groups(); self.refresh_rows(); self.save_data()
+
+    def confirm_delete(self, title, detail=""):
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("确认删除")
+        box.setText(title)
+        if detail:
+            box.setInformativeText(detail)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        box.button(QMessageBox.Yes).setText("删除")
+        box.button(QMessageBox.No).setText("取消")
+        return box.exec() == QMessageBox.Yes
 
     # ---------- 验证码面板 ----------
     def build_vpanel(self, layout):
@@ -960,15 +968,10 @@ class MainWindow(QWidget):
             self.fields[idx] = item; self.refresh_rows(); self.save_data()
 
     def click_delete(self, idx, btn):
-        rc = self.rows[idx]
-        if rc.delete_armed():
+        item = self.fields[idx]
+        if self.confirm_delete(f"确定删除条目「{item['name']}」吗？",
+                               "删除后无法恢复。"):
             del self.fields[idx]; self.refresh_rows(); self.save_data()
-        else:
-            rc.arm(True, btn)
-            def back():
-                if idx < len(self.rows) and self.rows[idx] is rc:
-                    rc.arm(False, btn)
-            threading.Timer(2.0, back).start()
 
     # ---------- 窗口行为 ----------
     def adjust_height(self):
