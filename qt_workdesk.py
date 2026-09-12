@@ -273,7 +273,8 @@ def adb_devices():
     adb = find_adb()
     if not adb:
         return None, []
-    out = subprocess.run([adb, "devices"], capture_output=True, timeout=10)
+    out = subprocess.run([adb, "devices"], capture_output=True, timeout=10,
+                         creationflags=subprocess.CREATE_NO_WINDOW)
     devs = []
     for line in out.stdout.decode("utf-8", "replace").splitlines()[1:]:
         p = line.strip().split("\t")
@@ -288,13 +289,18 @@ def sms_fetch(cfg):
     if cfg.get("serial"):
         cmd += ["-s", cfg["serial"]]
     cmd += ["shell", "content", "query", "--uri", "content://sms/inbox",
-            "--projection", "date,body", "--sort", "date DESC LIMIT 15"]
-    out = subprocess.run(cmd, capture_output=True, timeout=12)
+            "--projection", "date,body"]
+    out = subprocess.run(cmd, capture_output=True, timeout=12,
+                         creationflags=subprocess.CREATE_NO_WINDOW)
     base = int(cfg.get("base_date", 0))
+    n = 0
     for line in out.stdout.decode("utf-8", "replace").splitlines():
         m = re.match(r"Row:\s*\d+\s*date=(\d+)\s*body=(.*)", line, re.S)
         if not m:
             continue
+        n += 1
+        if n > 15:
+            break
         dms, body = int(m.group(1)), m.group(2).rstrip(",")
         if dms <= base:
             continue
@@ -503,7 +509,8 @@ class BindDialog(QDialog):
             self.sms_st.setText("未装adb"); return
         def work():
             try:
-                out = subprocess.run([adb]+args, capture_output=True, timeout=30)
+                out = subprocess.run([adb]+args, capture_output=True, timeout=30,
+                                     creationflags=subprocess.CREATE_NO_WINDOW)
                 t = (out.stdout.decode("utf-8","replace") +
                      out.stderr.decode("utf-8","replace")).strip()
                 self.sms_st.setText(t[:90] or "完成")
@@ -549,10 +556,11 @@ class BindDialog(QDialog):
         _, devs = adb_devices()
         if not devs:
             self.sms_st.setText("没有已连接设备"); return
-        self.app.verify_cfg["sms"] = {"serial": devs[0],
+        stable = next((d for d in devs if d.startswith("adb-")), devs[0])
+        self.app.verify_cfg["sms"] = {"serial": stable,
                                       "base_date": int(time.time()*1000)}
         self.app.save_verify_cfg()
-        self.sms_st.setText(f"已绑定 {devs[0]}")
+        self.sms_st.setText(f"已绑定 {stable}")
 
 
 # ================= 拖放宿主 =================
@@ -711,7 +719,8 @@ class MainWindow(QWidget):
 
         def warm():
             a = find_adb()
-            if a: subprocess.run([a,"start-server"], capture_output=True)
+            if a: subprocess.run([a,"start-server"], capture_output=True,
+                                 creationflags=subprocess.CREATE_NO_WINDOW)
         threading.Thread(target=warm, daemon=True).start()
 
     # ---------- 标题栏 ----------
