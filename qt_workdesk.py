@@ -612,7 +612,7 @@ class MainWindow(QWidget):
         self.masked = False
         self.verify_cfg = {"show_panel": True, "email": None, "sms": None}
         self._drag = None
-        self._watch = None; self._watch_left = 0
+        self._watch = None; self._remain = 0
         self._current_code = ""
         self.rows = []
 
@@ -838,8 +838,6 @@ class MainWindow(QWidget):
             if r:
                 uid, code, ts = r
                 self._found(code, "email", ts, uid)
-            else:
-                self._none()
         except Exception as e:
             self._fail("邮箱", str(e))
 
@@ -861,8 +859,6 @@ class MainWindow(QWidget):
             if r:
                 dms, code = r
                 self._found(code, "sms", dms/1000, dms)
-            else:
-                self._none()
         except Exception as e:
             self._fail("短信", str(e))
 
@@ -881,15 +877,26 @@ class MainWindow(QWidget):
         self.code_status(f"{tag}验证码已获取并自动复制（{ago}秒前）", ACCENT)
 
     def start_watch(self, src):
-        self.stop_watch(); self._watch_src = src; self._watch_left = 25
+        self.stop_watch()
+        self._watch_src = src
+        self._remain = 60      # 总等待 60 秒
+        self._poll_tick = 0
+        self.code_status("等待新验证码…（60s）")
+        self._watch = threading.Timer(1.0, self._watch_tick)
+        self._watch.start()
 
-    def _none(self):
-        if self._watch_left <= 0: return
-        self._watch_left -= 1
-        if self._watch_left <= 0:
-            self.code_status("等待超时：未收到新验证码", "#e53935"); return
-        self.code_status(f"等待新验证码…（{self._watch_left*3}s）")
-        self._watch = threading.Timer(3.0, self._retry); self._watch.start()
+    def _watch_tick(self):
+        self._remain -= 1
+        self._poll_tick += 1
+        if self._remain <= 0:
+            self.stop_watch()
+            self.code_status("等待超时：未收到新验证码", "#e53935")
+            return
+        self.code_status(f"等待新验证码…（{self._remain}s）")
+        if self._poll_tick % 3 == 0:   # 后台每 3 秒实际查询一次
+            self._retry()
+        self._watch = threading.Timer(1.0, self._watch_tick)
+        self._watch.start()
 
     def _retry(self):
         if self._watch_src == "email":
@@ -904,7 +911,7 @@ class MainWindow(QWidget):
 
     def stop_watch(self):
         if self._watch: self._watch.cancel(); self._watch = None
-        self._watch_left = 0
+        self._remain = 0
         self.code_status("已停止等待")
 
     def update_btns_state(self):
