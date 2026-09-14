@@ -45,7 +45,7 @@ TEXT = "#232a3a"
 MUTED = "#8b94a7"
 
 WIDTH = 320
-MIN_W, MAX_W = 264, 720
+MIN_W, MAX_W = 288, 720
 RESIZE_MARGIN = 6
 IDLE_SECONDS = 60
 
@@ -64,6 +64,11 @@ NUM_RE = re.compile(r"(?<!\d)(\d{4,8})(?!\d)")
 QSS = f"""
 QWidget {{ font-family: "Microsoft YaHei UI"; color: {TEXT}; font-size: 9pt; }}
 #root {{ background: {BG}; border-radius: 12px; }}
+#orb {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+        stop:0 #5b7cfa, stop:1 {ACCENT});
+        border-radius:28px; }}
+#orb QLabel {{ color:#fff; font-size:17px; font-weight:800;
+        background:transparent; }}
 #titlebar {{ background: {ACCENT}; border-top-left-radius:12px;
              border-top-right-radius:12px; }}
 #title {{ color:#fff; font-size:10pt; font-weight:700; }}
@@ -710,9 +715,10 @@ class MainWindow(QWidget):
         self.root = QFrame(); self.root.setObjectName("root")
         outer.addWidget(self.root)
 
-        rl = QVBoxLayout(self.root); rl.setContentsMargins(0,0,0,8)
-        rl.setSpacing(4)
-        self.build_titlebar(rl)
+        self.root_lay = QVBoxLayout(self.root)
+        self.root_lay.setContentsMargins(0,0,0,8)
+        self.root_lay.setSpacing(4)
+        self.build_titlebar(self.root_lay)
         self.body = QFrame(); self.body.setObjectName("body")
         bl = QVBoxLayout(self.body); bl.setContentsMargins(10,4,10,0)
         bl.setSpacing(6)
@@ -722,7 +728,19 @@ class MainWindow(QWidget):
         self.footer = QLabel("点条目复制 · 1分钟无操作自动收起")
         self.footer.setObjectName("footer")
         bl.addWidget(self.footer)
-        rl.addWidget(self.body)
+        self.root_lay.addWidget(self.body)
+
+        self.orb = QFrame(); self.orb.setObjectName("orb")
+        self.orb.setFixedSize(56, 56); self.orb.hide()
+        ol = QVBoxLayout(self.orb); ol.setContentsMargins(0,0,0,0)
+        orb_lbl = QLabel("复制"); orb_lbl.setAlignment(Qt.AlignCenter)
+        ol.addWidget(orb_lbl)
+        orb_sh = QGraphicsDropShadowEffect(self.orb)
+        orb_sh.setBlurRadius(20); orb_sh.setOffset(0, 3)
+        orb_sh.setColor(QColor(66, 99, 235, 170))
+        self.orb.setGraphicsEffect(orb_sh)
+        self.orb.installEventFilter(self)
+        self.root_lay.addWidget(self.orb, 0, Qt.AlignCenter)
 
         self.refresh_groups(); self.refresh_rows(); self.adjust_height()
         if self._saved_size and not self.collapsed:
@@ -733,7 +751,11 @@ class MainWindow(QWidget):
         if not self.verify_cfg.get("show_panel", True):
             self.vpanel.hide()
         if self.collapsed:
-            self.body.hide()
+            self.titlebar.hide(); self.body.hide(); self.orb.show()
+            self.root_lay.setContentsMargins(0, 0, 0, 0)
+            self.setMinimumSize(0, 0); self.setFixedSize(56, 56)
+            self.root.setStyleSheet("background:transparent;")
+            self.setAttribute(Qt.WA_TranslucentBackground, True)
         x, y = self.pos_xy or (90, 120)
         self.move(x, y)
 
@@ -744,21 +766,7 @@ class MainWindow(QWidget):
         self._idle_t = QTimer(self); self._idle_t.setInterval(5000)
         self._idle_t.timeout.connect(self._idle_check); self._idle_t.start()
 
-        # Win11 圆角 + 原生阴影（给无边框窗口补回 CAPTION/THICKFRAME 样式）
-        try:
-            hwnd = int(self.winId())
-            GWL_STYLE = -16
-            WS_CAPTION, WS_THICKFRAME = 0x00C00000, 0x00040000
-            cur = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
-            ctypes.windll.user32.SetWindowLongW(
-                hwnd, GWL_STYLE, cur | WS_CAPTION | WS_THICKFRAME)
-            DWM_WCP = 33; DWMWCP_ROUND = 2
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                hwnd, DWM_WCP,
-                ctypes.byref(ctypes.c_int(DWMWCP_ROUND)),
-                ctypes.sizeof(ctypes.c_int))
-        except Exception:
-            pass
+        self._apply_native_frame()
 
         def warm():
             a = find_adb()
@@ -797,29 +805,6 @@ class MainWindow(QWidget):
         return obj is self or (isinstance(obj, QWidget) and
                                self.isAncestorOf(obj))
 
-    def _edge_at(self, gp):
-        r = self.frameGeometry()
-        if not r.adjusted(-RESIZE_MARGIN, -RESIZE_MARGIN,
-                          RESIZE_MARGIN, RESIZE_MARGIN).contains(gp):
-            return Qt.Edges()
-        e = Qt.Edges()
-        if abs(gp.x()-r.left()) <= RESIZE_MARGIN: e |= Qt.LeftEdge
-        if abs(gp.x()-r.right()) <= RESIZE_MARGIN: e |= Qt.RightEdge
-        if abs(gp.y()-r.top()) <= RESIZE_MARGIN: e |= Qt.TopEdge
-        if abs(gp.y()-r.bottom()) <= RESIZE_MARGIN: e |= Qt.BottomEdge
-        return e
-
-    @staticmethod
-    def _edge_cursor(e):
-        h = bool(e & (Qt.LeftEdge | Qt.RightEdge))
-        v = bool(e & (Qt.TopEdge | Qt.BottomEdge))
-        if h and v:
-            return Qt.SizeFDiagCursor if (e & Qt.LeftEdge) == (e & Qt.TopEdge) \
-                else Qt.SizeBDiagCursor
-        if h: return Qt.SizeHorCursor
-        if v: return Qt.SizeVerCursor
-        return None
-
     def eventFilter(self, obj, ev):
         t = ev.type()
         if t in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick,
@@ -828,32 +813,115 @@ class MainWindow(QWidget):
         elif t == QEvent.MouseMove and ev.buttons() != Qt.NoButton \
                 and self._is_mine(obj):
             self._last_active = time.time()
-
-        if self._is_mine(obj) and t in (QEvent.MouseButtonPress,
-                                        QEvent.MouseMove):
-            gp = ev.globalPosition().toPoint()
-            edge = self._edge_at(gp)
-            if t == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton \
-                    and int(edge):
-                wh = self.windowHandle()
-                if wh:
-                    wh.startSystemResize(edge)
-                    return True
-            if t == QEvent.MouseMove and not ev.buttons():
-                cur = self._edge_cursor(edge)
-                self.setCursor(cur) if cur else self.unsetCursor()
-
-        if obj is self.titlebar:
-            if t == QEvent.MouseButtonDblClick:
-                self.toggle_collapse()
-            elif t == QEvent.MouseButtonPress and ev.button()==Qt.LeftButton:
-                self._drag = ev.globalPosition().toPoint()-self.pos()
-            elif t == QEvent.MouseMove and self._drag is not None:
-                self.move(ev.globalPosition().toPoint()-self._drag)
-            elif t == QEvent.MouseButtonRelease:
-                self._drag = None
-                self.pos_xy = [self.x(), self.y()]; self.save_data()
         return False
+
+    # ---------- Windows 原生缩放/拖动命中测试 ----------
+    def _apply_native_frame(self):
+        # Win11 圆角 + 原生阴影（给无边框窗口补回 CAPTION/THICKFRAME 样式）
+        try:
+            hwnd = int(self.winId())
+            GWL_STYLE = -16
+            WS_CAPTION, WS_THICKFRAME = 0x00C00000, 0x00040000
+            cur = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+            ctypes.windll.user32.SetWindowLongW(
+                hwnd, GWL_STYLE, cur | WS_CAPTION | WS_THICKFRAME)
+            DWM_WCP = 33; DWMWCP_ROUND = 2
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, DWM_WCP,
+                ctypes.byref(ctypes.c_int(DWMWCP_ROUND)),
+                ctypes.sizeof(ctypes.c_int))
+        except Exception:
+            pass
+        self.install_native_hittest()
+
+    def install_native_hittest(self):
+        try:
+            user32 = ctypes.windll.user32
+            self._hwnd = int(self.winId())
+            WNDPROC = ctypes.WINFUNCTYPE(
+                ctypes.c_long, ctypes.wintypes.HWND, ctypes.c_uint,
+                ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM)
+            set_long = getattr(user32, "SetWindowLongPtrW",
+                               user32.SetWindowLongW)
+            set_long.restype = ctypes.c_ssize_t
+            set_long.argtypes = [ctypes.wintypes.HWND, ctypes.c_int,
+                                 ctypes.c_void_p]
+            user32.CallWindowProcW.restype = ctypes.c_long
+            user32.CallWindowProcW.argtypes = [
+                ctypes.c_void_p, ctypes.wintypes.HWND, ctypes.c_uint,
+                ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]
+            # 同一窗口重复挂载前先还原最初过程，避免钩子链层层叠加
+            if getattr(self, "_hook_hwnd", None) == self._hwnd and \
+                    getattr(self, "_procs", None):
+                set_long(self._hwnd, -4,
+                         ctypes.c_void_p(self._procs[0][1]["old"]))
+                self._procs = []
+
+            holder = {}
+
+            def proc(h, msg, wp, lp):
+                if msg == 0x0084:  # WM_NCHITTEST
+                    hit = self._native_hit(lp)
+                    if hit is not None:
+                        return hit
+                if self.collapsed:
+                    if msg == 0x00A1:  # WM_NCLBUTTONDOWN
+                        self._nc_down = self._lp_xy(lp)
+                    elif msg == 0x00A2:  # WM_NCLBUTTONUP
+                        d0 = getattr(self, "_nc_down", None)
+                        self._nc_down = None
+                        if d0 is not None:
+                            dx = self._lp_xy(lp)
+                            if abs(dx[0]-d0[0])+abs(dx[1]-d0[1]) < 6:
+                                QTimer.singleShot(0, self.toggle_collapse)
+                            return 0
+                if msg == 0x00A3 and int(wp) == 2 and not self.collapsed:
+                    # 标题栏双击折叠，阻止系统最大化
+                    QTimer.singleShot(0, self.toggle_collapse)
+                    return 0
+                return user32.CallWindowProcW(holder["old"], h, msg, wp, lp)
+
+            new_cb = WNDPROC(proc)
+            old_proc = set_long(
+                self._hwnd, -4, ctypes.cast(new_cb, ctypes.c_void_p))
+            holder["old"] = old_proc
+            self._procs = getattr(self, "_procs", [])
+            self._procs.append((new_cb, holder))
+            self._hook_hwnd = self._hwnd
+            self._old_proc = old_proc
+        except Exception:
+            self._old_proc = None
+
+    @staticmethod
+    def _lp_xy(lp):
+        return (ctypes.c_short(lp & 0xFFFF).value,
+                ctypes.c_short((lp >> 16) & 0xFFFF).value)
+
+    def _native_hit(self, lp):
+        sx, sy = self._lp_xy(lp)
+        r = ctypes.wintypes.RECT()
+        ctypes.windll.user32.GetWindowRect(self._hwnd, ctypes.byref(r))
+        if self.collapsed:
+            return 2  # HTCAPTION 悬浮球整体可拖
+        b = RESIZE_MARGIN
+        at_l = sx - r.left <= b
+        at_r = r.right - sx <= b
+        at_t = sy - r.top <= b
+        at_b = r.bottom - sy <= b
+        if at_t and at_l: return 13
+        if at_t and at_r: return 14
+        if at_b and at_l: return 16
+        if at_b and at_r: return 17
+        if at_l: return 10
+        if at_r: return 11
+        if at_t: return 12
+        if at_b: return 15
+        if sy - r.top <= 40:
+            w = QApplication.widgetAt(sx, sy)
+            if isinstance(w, QPushButton):
+                return 1
+            return 2
+        return 1
 
     def _idle_check(self):
         if self.collapsed or self._remain > 0:
@@ -1164,9 +1232,7 @@ class MainWindow(QWidget):
     def adjust_height(self):
         QApplication.processEvents()
         if self.collapsed:
-            self.setMinimumHeight(0); self.setMaximumHeight(64)
-            self.resize(self.width(), 56); return
-        self.setMaximumHeight(16777215)
+            return
         panel = 132 if self.verify_cfg.get("show_panel", True) else 0
         n = max(len(self.fields), 1)
         rows_h = min(n*38+8, 330)
@@ -1176,17 +1242,47 @@ class MainWindow(QWidget):
         if not self._sized_once or self.height() < fit - 2:
             self.resize(self.width(), int(fit))
 
+    def _to_orb(self):
+        self.titlebar.hide(); self.body.hide(); self.orb.show()
+        self.root_lay.setContentsMargins(0, 0, 0, 0)
+        self.setMinimumSize(0, 0)
+        self.setFixedSize(56, 56)
+        self.root.setStyleSheet("background:transparent;")
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.show()
+        self._apply_native_frame()
+        try:  # 球形态去掉方形原生边框/阴影
+            hwnd = int(self.winId())
+            cur = ctypes.windll.user32.GetWindowLongW(hwnd, -16)
+            ctypes.windll.user32.SetWindowLongW(
+                hwnd, -16, cur & ~0x00C40000)
+        except Exception:
+            pass
+
+    def _to_panel(self):
+        self.orb.hide(); self.titlebar.show(); self.body.show()
+        self.root_lay.setContentsMargins(0, 0, 0, 8)
+        self.root.setStyleSheet("")
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setMaximumSize(16777215, 16777215)
+        self.setMinimumWidth(MIN_W); self.setMaximumWidth(MAX_W)
+        self.adjust_height()
+        w = self._expanded_size.width() if self._expanded_size else WIDTH
+        h0 = self._expanded_size.height() if self._expanded_size else 0
+        self.resize(w, max(h0, self.minimumHeight()))
+        self.show()
+        self._apply_native_frame()
+
     def toggle_collapse(self):
         if not self.collapsed:
             self._expanded_size = QSize(self.width(), self.height())
-        self.collapsed = not self.collapsed
-        self.body.setVisible(not self.collapsed)
-        self.t_col.setText("▲" if self.collapsed else "▼")
-        self.adjust_height()
-        if not self.collapsed and self._expanded_size:
-            self.resize(self._expanded_size.width(),
-                        max(self._expanded_size.height(),
-                            self.minimumHeight()))
+            self.collapsed = True
+            self.t_col.setText("▲")
+            self._to_orb()
+        else:
+            self.collapsed = False
+            self.t_col.setText("▼")
+            self._to_panel()
         self._last_active = time.time()
         self.save_data()
 
@@ -1203,6 +1299,7 @@ class MainWindow(QWidget):
                                           if self.pin_on else 0)
         self.setWindowFlags(flags)
         self.show()
+        self._apply_native_frame()
         self.save_data()
 
     def toggle_mask(self):
