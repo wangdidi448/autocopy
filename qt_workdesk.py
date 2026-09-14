@@ -23,7 +23,7 @@ from email.utils import parsedate_to_datetime
 import urllib.request
 import zipfile
 from PySide6.QtCore import (Qt, QObject, Signal, QPoint, QSize, QEvent,
-                            QMimeData)
+                            QMimeData, QTimer)
 from PySide6.QtGui import (QFont, QIcon, QColor, QCursor, QDrag)
 from PySide6.QtWidgets import (
     QApplication, QWidget, QFrame, QLabel, QPushButton, QVBoxLayout,
@@ -45,6 +45,9 @@ TEXT = "#232a3a"
 MUTED = "#8b94a7"
 
 WIDTH = 320
+MIN_W, MAX_W = 264, 720
+RESIZE_MARGIN = 6
+IDLE_SECONDS = 60
 
 EMAIL_HOSTS = {
     "163.com": "imap.163.com", "126.com": "imap.126.com",
@@ -691,12 +694,17 @@ class MainWindow(QWidget):
         self._watch = None; self._remain = 0
         self._current_code = ""
         self.rows = []
+        self._saved_size = None
+        self._expanded_size = None
+        self._sized_once = False
+        self._last_active = time.time()
 
         self.load_data(); self.load_verify_cfg()
 
         self.setWindowFlags(Qt.FramelessWindowHint |
                             (Qt.WindowStaysOnTopHint if self.pin_on else 0))
-        self.setFixedWidth(WIDTH)
+        self.setMinimumWidth(MIN_W); self.setMaximumWidth(MAX_W)
+        self.resize(self._saved_size[0] if self._saved_size else WIDTH, 400)
 
         outer = QVBoxLayout(self); outer.setContentsMargins(0,0,0,0)
         self.root = QFrame(); self.root.setObjectName("root")
@@ -711,12 +719,16 @@ class MainWindow(QWidget):
         self.build_groupbar(bl)
         self.build_vpanel(bl)
         self.build_rows_area(bl)
-        self.footer = QLabel("点条目复制 · 数据本地保存")
+        self.footer = QLabel("点条目复制 · 1分钟无操作自动收起")
         self.footer.setObjectName("footer")
         bl.addWidget(self.footer)
         rl.addWidget(self.body)
 
         self.refresh_groups(); self.refresh_rows(); self.adjust_height()
+        if self._saved_size and not self.collapsed:
+            self.resize(self._saved_size[0],
+                        max(self._saved_size[1], self.minimumHeight()))
+        self._sized_once = True
         self.update_btns_state()
         if not self.verify_cfg.get("show_panel", True):
             self.vpanel.hide()
@@ -724,6 +736,13 @@ class MainWindow(QWidget):
             self.body.hide()
         x, y = self.pos_xy or (90, 120)
         self.move(x, y)
+
+        # 全局事件过滤器：边缘缩放 + 空闲心跳
+        QApplication.instance().installEventFilter(self)
+        self._save_size_t = QTimer(self); self._save_size_t.setSingleShot(True)
+        self._save_size_t.timeout.connect(self.save_data)
+        self._idle_t = QTimer(self); self._idle_t.setInterval(5000)
+        self._idle_t.timeout.connect(self._idle_check); self._idle_t.start()
 
         # Win11 圆角 + 原生阴影（给无边框窗口补回 CAPTION/THICKFRAME 样式）
         try:
@@ -774,16 +793,73 @@ class MainWindow(QWidget):
         self.titlebar = tb
         tb.installEventFilter(self)
 
+    def _is_mine(self, obj):
+        return obj is self or (isinstance(obj, QWidget) and
+                               self.isAncestorOf(obj))
+
+    def _edge_at(self, gp):
+        r = self.frameGeometry()
+        if not r.adjusted(-RESIZE_MARGIN, -RESIZE_MARGIN,
+                          RESIZE_MARGIN, RESIZE_MARGIN).contains(gp):
+            return Qt.Edges()
+        e = Qt.Edges()
+        if abs(gp.x()-r.left()) <= RESIZE_MARGIN: e |= Qt.LeftEdge
+        if abs(gp.x()-r.right()) <= RESIZE_MARGIN: e |= Qt.RightEdge
+        if abs(gp.y()-r.top()) <= RESIZE_MARGIN: e |= Qt.TopEdge
+        if abs(gp.y()-r.bottom()) <= RESIZE_MARGIN: e |= Qt.BottomEdge
+        return e
+
+    @staticmethod
+    def _edge_cursor(e):
+        h = bool(e & (Qt.LeftEdge | Qt.RightEdge))
+        v = bool(e & (Qt.TopEdge | Qt.BottomEdge))
+        if h and v:
+            return Qt.SizeFDiagCursor if (e & Qt.LeftEdge) == (e & Qt.TopEdge) \
+                else Qt.SizeBDiagCursor
+        if h: return Qt.SizeHorCursor
+        if v: return Qt.SizeVerCursor
+        return None
+
     def eventFilter(self, obj, ev):
+        t = ev.type()
+        if t in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick,
+                 QEvent.Wheel, QEvent.KeyPress) and self._is_mine(obj):
+            self._last_active = time.time()
+        elif t == QEvent.MouseMove and ev.buttons() != Qt.NoButton \
+                and self._is_mine(obj):
+            self._last_active = time.time()
+
+        if self._is_mine(obj) and t in (QEvent.MouseButtonPress,
+                                        QEvent.MouseMove):
+            gp = ev.globalPosition().toPoint()
+            edge = self._edge_at(gp)
+            if t == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton \
+                    and int(edge):
+                wh = self.windowHandle()
+                if wh:
+                    wh.startSystemResize(edge)
+                    return True
+            if t == QEvent.MouseMove and not ev.buttons():
+                cur = self._edge_cursor(edge)
+                self.setCursor(cur) if cur else self.unsetCursor()
+
         if obj is self.titlebar:
-            if ev.type() == QEvent.MouseButtonPress and ev.button()==Qt.LeftButton:
+            if t == QEvent.MouseButtonDblClick:
+                self.toggle_collapse()
+            elif t == QEvent.MouseButtonPress and ev.button()==Qt.LeftButton:
                 self._drag = ev.globalPosition().toPoint()-self.pos()
-            elif ev.type() == QEvent.MouseMove and self._drag is not None:
+            elif t == QEvent.MouseMove and self._drag is not None:
                 self.move(ev.globalPosition().toPoint()-self._drag)
-            elif ev.type() == QEvent.MouseButtonRelease:
+            elif t == QEvent.MouseButtonRelease:
                 self._drag = None
                 self.pos_xy = [self.x(), self.y()]; self.save_data()
         return False
+
+    def _idle_check(self):
+        if self.collapsed or self._remain > 0:
+            return
+        if time.time() - self._last_active >= IDLE_SECONDS:
+            self.toggle_collapse()
 
     def tb_btn(self, text, fn):
         b = QPushButton(text); b.setObjectName("tbtn")
@@ -1087,21 +1163,39 @@ class MainWindow(QWidget):
     # ---------- 窗口行为 ----------
     def adjust_height(self):
         QApplication.processEvents()
+        if self.collapsed:
+            self.setMinimumHeight(0); self.setMaximumHeight(64)
+            self.resize(self.width(), 56); return
+        self.setMaximumHeight(16777215)
+        panel = 132 if self.verify_cfg.get("show_panel", True) else 0
         n = max(len(self.fields), 1)
         rows_h = min(n*38+8, 330)
-        h = 40 + 8
-        if not self.collapsed:
-            h += rows_h
-            if self.verify_cfg.get("show_panel", True):
-                h += 132
-            h += 34
-        self.setFixedHeight(h+24)
+        fit = 40+8 + rows_h + 34 + 24 + panel
+        min_h = 40+8 + 44 + 30 + 24 + panel
+        self.setMinimumHeight(int(min_h))
+        if not self._sized_once or self.height() < fit - 2:
+            self.resize(self.width(), int(fit))
 
     def toggle_collapse(self):
+        if not self.collapsed:
+            self._expanded_size = QSize(self.width(), self.height())
         self.collapsed = not self.collapsed
         self.body.setVisible(not self.collapsed)
         self.t_col.setText("▲" if self.collapsed else "▼")
-        self.adjust_height(); self.save_data()
+        self.adjust_height()
+        if not self.collapsed and self._expanded_size:
+            self.resize(self._expanded_size.width(),
+                        max(self._expanded_size.height(),
+                            self.minimumHeight()))
+        self._last_active = time.time()
+        self.save_data()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if not self.collapsed:
+            self._saved_size = [self.width(), self.height()]
+            if hasattr(self, "_save_size_t"):
+                self._save_size_t.start(400)
 
     def toggle_pin(self):
         self.pin_on = not self.pin_on
@@ -1120,7 +1214,7 @@ class MainWindow(QWidget):
         self.footer.setText(t)
         self.footer.setStyleSheet(f"color:{'#e53935' if warn else ACCENT};")
         def back():
-            self.footer.setText("点条目复制 · 数据本地保存")
+            self.footer.setText("点条目复制 · 1分钟无操作自动收起")
             self.footer.setStyleSheet(f"color:{MUTED};")
         threading.Timer(1.6, back).start()
 
@@ -1224,6 +1318,9 @@ class MainWindow(QWidget):
             self.active_group = min(d.get("active_group",0),len(self.groups)-1)
             self.pos_xy = d.get("pos"); self.collapsed = d.get("collapsed",False)
             self.pin_on = d.get("pin_on",True); self.masked = d.get("masked",False)
+            sz = d.get("size")
+            if isinstance(sz, list) and len(sz) == 2:
+                self._saved_size = [int(sz[0]), int(sz[1])]
         elif d and d.get("fields"):
             self.groups = [{"name":"求职信息","fields":d["fields"]},
                            {"name":"应用密码","fields":[]}]
@@ -1234,7 +1331,8 @@ class MainWindow(QWidget):
     def save_data(self):
         json.dump({"groups":self.groups,"active_group":self.active_group,
                    "pos":[self.x(),self.y()],"collapsed":self.collapsed,
-                   "pin_on":self.pin_on,"masked":self.masked},
+                   "pin_on":self.pin_on,"masked":self.masked,
+                   "size":self._saved_size},
                   open(DATA_FILE,"w",encoding="utf-8"),
                   ensure_ascii=False, indent=2)
 
