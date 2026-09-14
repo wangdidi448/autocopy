@@ -24,7 +24,8 @@ import urllib.request
 import zipfile
 from PySide6.QtCore import (Qt, QObject, Signal, QPoint, QSize, QEvent,
                             QMimeData, QTimer)
-from PySide6.QtGui import (QFont, QIcon, QColor, QCursor, QDrag)
+from PySide6.QtGui import (QFont, QIcon, QColor, QCursor, QDrag,
+                            QPainter, QRadialGradient, QPen, QBrush)
 from PySide6.QtWidgets import (
     QApplication, QWidget, QFrame, QLabel, QPushButton, QVBoxLayout,
     QHBoxLayout, QComboBox, QScrollArea, QSizePolicy, QDialog, QLineEdit,
@@ -73,7 +74,8 @@ QWidget {{ font-family: "Microsoft YaHei UI"; color: {TEXT}; font-size: 9pt; }}
              border-top-right-radius:12px; }}
 #title {{ color:#fff; font-size:10pt; font-weight:700; }}
 #tbtn {{ background:transparent; color:#fff; border:none;
-         border-radius:7px; padding:4px 8px; font-size:9pt; }}
+         border-radius:8px; padding:5px 8px; min-width:26px; min-height:28px;
+         font-size:10pt; }}
 #tbtn:hover {{ background: rgba(255,255,255,0.20); }}
 #tbtn:pressed {{ background: rgba(255,255,255,0.32); }}
 .card, #card {{ background:{CARD}; border:1px solid {BORDER}; border-radius:10px; }}
@@ -640,7 +642,9 @@ class RowCard(QFrame):
         self.k.setStyleSheet(f"color:{item.get('color','#666')};")
         self.k.setFixedWidth(78); self.k.setAlignment(Qt.AlignRight
                                                       | Qt.AlignVCenter)
+        self.k.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.v = QLabel(); self.v.setMinimumWidth(90)
+        self.v.setAttribute(Qt.WA_TransparentForMouseEvents)
         self._set_value_text(item)
         b_edit = QPushButton("✎"); b_edit.setObjectName("rbtn")
         b_del = QPushButton("✕"); b_del.setObjectName("rbtn")
@@ -685,6 +689,40 @@ class RowCard(QFrame):
 
 
 # ================= 主窗口 =================
+class OrbIcon(QWidget):
+    """折叠态圆形悬浮球：自绘蓝色渐变圆 + 白色剪贴板图标"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(56, 56)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        # 蓝色渐变圆球
+        grad = QRadialGradient(26, 20, 30, 28, 28, 42)
+        grad.setColorAt(0, QColor("#6f8bff"))
+        grad.setColorAt(0.6, QColor("#4a66e8"))
+        grad.setColorAt(1, QColor("#3449b8"))
+        p.setBrush(QBrush(grad))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(2, 2, 52, 52)
+        # 顶部高光弧
+        p.setBrush(QColor(255, 255, 255, 35))
+        p.drawEllipse(8, 5, 40, 18)
+        # 白色剪贴板图标
+        p.setBrush(QColor(255, 255, 255, 240))
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect(20, 23, 20, 21, 3, 3)          # 板身
+        p.setBrush(QColor("#3a52c4"))
+        p.drawRoundedRect(24, 19, 12, 7, 2, 2)            # 板夹
+        p.setBrush(QColor(255, 255, 255, 240))
+        p.drawRoundedRect(24, 31, 12, 2, 1, 1)            # 文字线1
+        p.drawRoundedRect(24, 36, 12, 2, 1, 1)            # 文字线2
+        p.end()
+
+
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -730,14 +768,11 @@ class MainWindow(QWidget):
         bl.addWidget(self.footer)
         self.root_lay.addWidget(self.body)
 
-        self.orb = QFrame(); self.orb.setObjectName("orb")
-        self.orb.setFixedSize(56, 56); self.orb.hide()
-        ol = QVBoxLayout(self.orb); ol.setContentsMargins(0,0,0,0)
-        orb_lbl = QLabel("复制"); orb_lbl.setAlignment(Qt.AlignCenter)
-        ol.addWidget(orb_lbl)
+        self.orb = OrbIcon()
+        self.orb.hide()
         orb_sh = QGraphicsDropShadowEffect(self.orb)
-        orb_sh.setBlurRadius(20); orb_sh.setOffset(0, 3)
-        orb_sh.setColor(QColor(66, 99, 235, 170))
+        orb_sh.setBlurRadius(22); orb_sh.setOffset(0, 4)
+        orb_sh.setColor(QColor(66, 99, 235, 180))
         self.orb.setGraphicsEffect(orb_sh)
         self.orb.installEventFilter(self)
         self.root_lay.addWidget(self.orb, 0, Qt.AlignCenter)
@@ -813,6 +848,25 @@ class MainWindow(QWidget):
         elif t == QEvent.MouseMove and ev.buttons() != Qt.NoButton \
                 and self._is_mine(obj):
             self._last_active = time.time()
+        # 悬浮球：Qt 级处理，点击展开 / 按住拖动
+        if obj is self.orb:
+            if t == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
+                self._orb_press = ev.globalPosition().toPoint()
+                self._orb_drag = ev.globalPosition().toPoint() - self.pos()
+            elif t == QEvent.MouseMove and ev.buttons() == Qt.LeftButton \
+                    and getattr(self, "_orb_drag", None) is not None:
+                self.move(ev.globalPosition().toPoint() - self._orb_drag)
+            elif t == QEvent.MouseButtonRelease:
+                press = getattr(self, "_orb_press", None)
+                moved = ((ev.globalPosition().toPoint() - press)
+                         .manhattanLength()) if press else 99
+                self._orb_press = None
+                self._orb_drag = None
+                if moved < 6:
+                    self.toggle_collapse()
+                else:
+                    self.pos_xy = [self.x(), self.y()]
+                    self.save_data()
         return False
 
     # ---------- Windows 原生缩放/拖动命中测试 ----------
@@ -864,17 +918,6 @@ class MainWindow(QWidget):
                     hit = self._native_hit(lp)
                     if hit is not None:
                         return hit
-                if self.collapsed:
-                    if msg == 0x00A1:  # WM_NCLBUTTONDOWN
-                        self._nc_down = self._lp_xy(lp)
-                    elif msg == 0x00A2:  # WM_NCLBUTTONUP
-                        d0 = getattr(self, "_nc_down", None)
-                        self._nc_down = None
-                        if d0 is not None:
-                            dx = self._lp_xy(lp)
-                            if abs(dx[0]-d0[0])+abs(dx[1]-d0[1]) < 6:
-                                QTimer.singleShot(0, self.toggle_collapse)
-                            return 0
                 if msg == 0x00A3 and int(wp) == 2 and not self.collapsed:
                     # 标题栏双击折叠，阻止系统最大化
                     QTimer.singleShot(0, self.toggle_collapse)
@@ -902,7 +945,11 @@ class MainWindow(QWidget):
         r = ctypes.wintypes.RECT()
         ctypes.windll.user32.GetWindowRect(self._hwnd, ctypes.byref(r))
         if self.collapsed:
-            return 2  # HTCAPTION 悬浮球整体可拖
+            return 1  # HTCLIENT：悬浮球交给 Qt 处理点击/拖动，判定更稳
+        # 按钮优先：避免边缘缩放区吃掉标题栏按钮的点击
+        w = QApplication.widgetAt(sx, sy)
+        if isinstance(w, QPushButton):
+            return 1
         b = RESIZE_MARGIN
         at_l = sx - r.left <= b
         at_r = r.right - sx <= b
@@ -917,10 +964,7 @@ class MainWindow(QWidget):
         if at_t: return 12
         if at_b: return 15
         if sy - r.top <= 40:
-            w = QApplication.widgetAt(sx, sy)
-            if isinstance(w, QPushButton):
-                return 1
-            return 2
+            return 2  # HTCAPTION 标题栏拖动
         return 1
 
     def _idle_check(self):
